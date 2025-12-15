@@ -153,6 +153,9 @@ class Palette:
         # hovered text id for tooltip bolding
         self.hovered_text_id = None
 
+        # (추가) points 변경 시 외부로 알리는 콜백 함수 저장용
+        self.points_changed_callback = None
+
         self.canvas.bind("<Button-1>", self.on_left_click)
         self.canvas.bind("<Button-3>", self.on_right_click)
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
@@ -166,6 +169,17 @@ class Palette:
         self.canvas.bind("<ButtonRelease-1>", self.on_left_release)
 
         self.redraw_all()
+
+    # ---------- (추가) points 변경 알림 ----------
+
+    def _notify_points_changed(self):
+        """점이 추가되거나 삭제되었을 때 등록된 콜백 함수를 호출"""
+        cb = getattr(self, "points_changed_callback", None)
+        if callable(cb):
+            try:
+                cb(self)
+            except Exception:
+                pass
 
     # ---------- 모드 전환 ----------
 
@@ -421,6 +435,7 @@ class Palette:
             if p0.kind == "inlet":
                 p0.flow = self.inlet_flow
         self.redraw_all()
+        self._notify_points_changed()
 
     def on_left_click(self, event):
         # Pencil 모드: 자유 라인 그리기 시작
@@ -457,6 +472,8 @@ class Palette:
 
         self.segments.clear()
         self.redraw_all()
+        # (추가) 점 추가 시 합계 갱신
+        self._notify_points_changed()
 
     def on_right_click(self, event):
         sx, sy = event.x, event.y
@@ -496,6 +513,8 @@ class Palette:
         target.flow = new_flow
         self.segments.clear()
         self.redraw_all()
+        # (추가) 풍량 변경시 호출 (위치 변경은 없지만 갱신)
+        self._notify_points_changed()
 
     def _find_point_near_model(self, mx, my, tol_model=0.3):
         for p in self.points:
@@ -535,9 +554,7 @@ class Palette:
             seg.is_hovered = True
             self.hovered_segment = seg
 
-        # 화면 갱신
         # 텍스트 hover 처리: point 텍스트(풍량) 위에 커서가 있으면 굵게
-        # 우선 계산된 모델 좌표를 스크린 좌표로 변환하여 비교
         hovered_text = None
         for p in self.points:
             if p.text_id is None:
@@ -1186,11 +1203,15 @@ class Palette:
         self.points.pop()
         self.segments.clear()
         self.redraw_all()
+        # (추가) 삭제 시 갱신
+        self._notify_points_changed()
 
     def clear_all(self):
         self.points.clear()
         self.segments.clear()
         self.redraw_all()
+        # (추가) 전체 삭제 시 갱신
+        self._notify_points_changed()
 
     def distribute_equal_flow(self):
         if not self.points:
@@ -1216,6 +1237,60 @@ class Palette:
 
         self.segments.clear()
         self.redraw_all()
+        # 좌표 변화는 없지만, 사용자 기대상 “지정” 후 갱신 원할 수 있어 호출
+        self._notify_points_changed()
+
+
+# =========================
+# (추가) outlet 상대 위치 통계 표시 함수
+# =========================
+
+relpos_text_widget = None  # GUI 생성 후 할당됨
+
+def update_outlet_calculations(pal: Palette):
+    """
+    inlet 기준 outlet들의 상대 위치 통계 계산
+    1) Σ(inlet.x - outlet.x)
+    2) Σ(inlet.y - outlet.y)
+    3) Σ(inlet.x - outlet.x)^2
+    4) Σ(inlet.y - outlet.y)^2
+    """
+    global relpos_text_widget
+    if relpos_text_widget is None:
+        return
+
+    if not pal.points or pal.points[0].kind != "inlet":
+        text = "inlet이 없습니다."
+    else:
+        inlet = pal.points[0]
+        outlets = [p for p in pal.points[1:] if p.kind == "outlet"]
+        
+        sum_dx = 0.0
+        sum_dy = 0.0
+        sum_sq_dx = 0.0
+        sum_sq_dy = 0.0
+        
+        for p in outlets:
+            dx = inlet.mx - p.mx  # inlet - outlet
+            dy = inlet.my - p.my  # inlet - outlet
+            sum_dx += dx
+            sum_dy += dy
+            sum_sq_dx += dx**2
+            sum_sq_dy += dy**2
+            
+        text = (
+            f"Outlet 개수: {len(outlets)}\n"
+            f"1. Σ(inlet.x - outlet.x) : {sum_dx:.2f} m\n"
+            f"2. Σ(inlet.y - outlet.y) : {sum_dy:.2f} m\n"
+            f"3. Σ(inlet.x - outlet.x)²: {sum_sq_dx:.2f} m²\n"
+            f"4. Σ(inlet.y - outlet.y)²: {sum_sq_dy:.2f} m²"
+        )
+
+    relpos_text_widget.config(state="normal")
+    relpos_text_widget.delete("1.0", "end")
+    relpos_text_widget.insert("end", text)
+    relpos_text_widget.config(state="disabled")
+
 
 # =========================
 # GUI 이벤트 함수
@@ -1251,6 +1326,9 @@ def calculate():
         results_text_widget.config(state="disabled")
 
         palette.set_inlet_flow(q)
+
+        # inlet 유무/상태 표시도 즉시 갱신
+        update_outlet_calculations(palette)
 
     except ValueError as e:
         messagebox.showerror("입력 오류", f"입력값을 확인하세요!\n\n{e}")
@@ -1356,7 +1434,6 @@ left_frame = tk.Frame(main_frame)
 left_frame.pack(side="left", anchor="w")
 
 right_frame = tk.Frame(main_frame, bg="#f5f5f5", bd=1, relief="solid")
-# Palette 크기 약 30% 축소: 기본 폭 제한(사용자 창 크기에 따라 조정 가능)
 right_frame.configure(width=700)
 right_frame.pack(side="right", fill="both", expand=True)
 
@@ -1420,6 +1497,27 @@ results_scrollbar.pack(side="right", fill="y")
 results_text_widget.configure(yscrollcommand=results_scrollbar.set)
 results_text_widget.config(state="disabled")
 
+# (추가/수정) outlet 상대 위치 통계 표시용 별도 텍스트 창 (높이 증가)
+relpos_frame = tk.Frame(left_frame)
+relpos_frame.grid(row=9, column=0, columnspan=2, padx=5, pady=(0, 5), sticky="nsew")
+
+tk.Label(relpos_frame, text="Outlet 상대 위치 통계 (inlet - outlet):").pack(anchor="w")
+
+relpos_text_widget = tk.Text(
+    relpos_frame,
+    width=36,
+    height=6,  # 4가지 항목 표시를 위해 높이 증가
+    wrap="word",
+    bg="white",
+    relief="solid"
+)
+relpos_text_widget.pack(fill="both", expand=True)
+relpos_text_widget.config(state="disabled")
+
 palette = Palette(right_frame)
+
+# (추가) points 변경 시 자동 갱신 연결 + 초기 1회 표시
+palette.points_changed_callback = update_outlet_calculations
+update_outlet_calculations(palette)
 
 root.mainloop()
