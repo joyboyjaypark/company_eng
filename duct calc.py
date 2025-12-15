@@ -150,6 +150,8 @@ class Palette:
         # 라인 hover/drag 상태
         self.hovered_segment = None
         self.dragging_segment = None
+        # hovered text id for tooltip bolding
+        self.hovered_text_id = None
 
         self.canvas.bind("<Button-1>", self.on_left_click)
         self.canvas.bind("<Button-3>", self.on_right_click)
