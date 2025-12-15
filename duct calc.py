@@ -372,36 +372,46 @@ class Palette:
             outlets = [p for p in self.points if p.kind == "outlet"]
             
             if outlets:
+                sum_dx = 0.0
+                sum_dy = 0.0
+                sum_abs_dx = 0.0
+                sum_abs_dy = 0.0
                 sum_sq_dx = 0.0
                 sum_sq_dy = 0.0
-                
+
                 for p in outlets:
                     dx = cur_mx - p.mx  # 마우스.x - outlet.x
                     dy = cur_my - p.my  # 마우스.y - outlet.y
+                    sum_dx += dx
+                    sum_dy += dy
+                    sum_abs_dx += abs(dx)
+                    sum_abs_dy += abs(dy)
                     sum_sq_dx += dx**2
                     sum_sq_dy += dy**2
-                
+
                 tooltip_text = (
-                    f"Σ(Cursor.x - Outlet.x)²: {sum_sq_dx:.1f}\n"
-                    f"Σ(Cursor.y - Outlet.y)²: {sum_sq_dy:.1f}"
+                    f"Σ(Cursor.x - Outlet.x) : {sum_dx:.2f} m\n"
+                    f"Σ(Cursor.y - Outlet.y) : {sum_dy:.2f} m\n"
+                    f"Σ(|Cursor.x - Outlet.x|) : {sum_abs_dx:.2f} m\n"
+                    f"Σ(|Cursor.y - Outlet.y|) : {sum_abs_dy:.2f} m\n"
+                    f"Σ(Cursor.x - Outlet.x)²: {sum_sq_dx:.2f} m²\n"
+                    f"Σ(Cursor.y - Outlet.y)²: {sum_sq_dy:.2f} m²"
                 )
-                
+
                 # 마우스 화면 좌표
                 msx, msy = self.model_to_screen(cur_mx, cur_my)
-                
+
                 # 텍스트 오프셋
                 tx, ty = msx + 20, msy + 20
-                
-                # 배경 사각형을 위해 텍스트 크기 대략 추정 (생략 가능하나 가독성을 위해)
-                # create_text 후 bbox를 얻어 배경을 그리는 방식이 깔끔하나, 
-                # 여기서는 redraw_all 구조상 텍스트를 바로 그립니다.
-                
-                # 배경 박스 (약간 투명한 느낌의 색상)
+
+                # 배경 박스 크기 확장 (텍스트 줄 수 증가)
+                box_w = 260
+                box_h = 100
                 self.canvas.create_rectangle(
-                    tx - 5, ty - 5, tx + 160, ty + 35,
+                    tx - 5, ty - 5, tx + box_w, ty + box_h,
                     fill="#ffffe0", outline="black"
                 )
-                
+
                 self.canvas.create_text(
                     tx, ty,
                     text=tooltip_text,
