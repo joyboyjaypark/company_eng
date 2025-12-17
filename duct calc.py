@@ -3,11 +3,11 @@ from tkinter import messagebox, ttk, simpledialog
 import math
 
 # =========================
-# 계산 함수들
+# 1. 계산 함수들 (Engineering Logic)
 # =========================
 
 def calc_circular_diameter(q_m3h: float, dp_mmAq_per_m: float) -> float:
-    """등가 원형 덕트 직경 D1 (mm) 계산"""
+    """풍량(m3/h)과 정압(mmAq/m)을 이용해 등가 원형 덕트 직경 D1(mm) 계산"""
     if q_m3h <= 0:
         return 0.0
     if dp_mmAq_per_m <= 0:
@@ -27,7 +27,7 @@ def round_step_down(x: float, step: float = 50) -> float:
 
 
 def rect_equiv_diameter(a_mm: float, b_mm: float) -> float:
-    """사각 덕트 a,b(mm)에 대한 등가 원형 직경 De(mm) (ASHRAE)"""
+    """사각 덕트 a,b(mm)에 대한 등가 원형 직경 De(mm) (ASHRAE 공식)"""
     if a_mm <= 0 or b_mm <= 0:
         return 0.0
     a, b = float(a_mm), float(b_mm)
@@ -35,6 +35,7 @@ def rect_equiv_diameter(a_mm: float, b_mm: float) -> float:
 
 
 def size_rect_from_D1(D1: float, aspect_ratio: float, step: float = 50):
+    """원형 직경 D1과 종횡비를 기준으로 사각 덕트 사이즈 산출"""
     if D1 <= 0:
         return 0, 0, 0.0, 0.0, 0.0
     if aspect_ratio <= 0:
@@ -43,10 +44,12 @@ def size_rect_from_D1(D1: float, aspect_ratio: float, step: float = 50):
     De_target = float(D1)
     r = float(aspect_ratio)
 
+    # 이론적 사각 사이즈
     a_theo = De_target * (1 + r)**0.25 / (1.30 * r**0.625)
     b_theo = r * a_theo
     theo_big, theo_small = max(a_theo, b_theo), min(a_theo, b_theo)
 
+    # 후보군 계산
     small_up = round_step_up(theo_small, step)
     big_down = max(round_step_down(theo_big, step), step)
     De1 = rect_equiv_diameter(small_up, big_down)
@@ -71,6 +74,7 @@ def size_rect_from_D1(D1: float, aspect_ratio: float, step: float = 50):
     )
 
 def calc_rect_other_side(D1: float, fixed_side_mm: float, step: float = 50):
+    """한 변이 고정된 상태에서 D1을 만족하는 다른 한 변 계산"""
     if D1 <= 0:
         return 0, 0, 0.0
     if fixed_side_mm <= 0:
@@ -78,12 +82,13 @@ def calc_rect_other_side(D1: float, fixed_side_mm: float, step: float = 50):
     
     fixed = round_step_up(fixed_side_mm, step)
     other = 50.0
+    # 50mm씩 증가시키며 최소 요구 직경을 만족하는지 확인
     while True:
         de = rect_equiv_diameter(fixed, other)
-        if de >= D1 - 0.1:
+        if de >= D1 - 0.1: # 허용 오차 고려
             break
         other += step
-        if other > 10000:
+        if other > 10000: # 무한 루프 방지
             break
             
     sel_big = max(fixed, other)
@@ -91,15 +96,17 @@ def calc_rect_other_side(D1: float, fixed_side_mm: float, step: float = 50):
     return int(sel_big), int(sel_small), round(de, 1)
 
 def perform_sizing(q: float, dp: float, use_fixed: bool, fixed_val: float, aspect_r: float):
+    """사이징 옵션(종횡비 vs 고정변)에 따라 적절한 함수를 호출하여 결과 반환"""
     if q <= 0:
         return 0, 0, f"{int(q)}m³/h"
     try:
         D1 = calc_circular_diameter(q, dp)
         if use_fixed:
             w, h, de = calc_rect_other_side(D1, fixed_val, 50)
-            theo_big, theo_small = 0.0, 0.0
+            # 고정 변 모드에서는 이론치 계산 생략
         else:
             w, h, de, theo_big, theo_small = size_rect_from_D1(D1, aspect_r, 50)
+        
         label = f"{w}x{h} {int(q)}m³/h"
         return w, h, label
     except Exception:
@@ -107,7 +114,7 @@ def perform_sizing(q: float, dp: float, use_fixed: bool, fixed_val: float, aspec
 
 
 # =========================
-# 팔레트(Canvas) 관련
+# 2. 데이터 모델 및 팔레트 클래스
 # =========================
 
 GRID_STEP_MODEL = 0.5
@@ -138,6 +145,8 @@ class DuctSegment:
         self.line_ids = []
         self.text_id = None
         self.leader_id = None
+        
+        # 상호작용 상태
         self.is_hovered = False
         self.is_dragging = False
         self.drag_start_model = None
@@ -165,11 +174,13 @@ class Palette:
 
         self.segments = []
 
-        self.mode = "pan"
+        # 그리기 모드
+        self.mode = "pan"  # "pan" or "pencil"
         self._drawing = False
         self._draw_start = None
         self._preview_line_id = None
 
+        # 마우스 상호작용
         self.hovered_segment = None
         self.dragging_segment = None
         self.hovered_text_id = None
@@ -177,6 +188,7 @@ class Palette:
 
         self.points_changed_callback = None
 
+        # 이벤트 바인딩
         self.canvas.bind("<Button-1>", self.on_left_click)
         self.canvas.bind("<Button-3>", self.on_right_click)
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
@@ -251,6 +263,7 @@ class Palette:
         self.canvas.delete("all")
         self.draw_grid()
 
+        # 점 그리기
         for p in self.points:
             sx, sy = self.model_to_screen(p.mx, p.my)
             color = "red" if p.kind == "inlet" else "blue"
@@ -259,6 +272,7 @@ class Palette:
             label = f"{p.flow:.1f}"
             p.text_id = self.canvas.create_text(sx + 10, sy - 10, text=label, fill="black", font=("Arial", 8))
 
+        # 덕트 선 그리기
         for seg in self.segments:
             seg.line_ids.clear()
             seg.text_id = None
@@ -273,12 +287,12 @@ class Palette:
             
             seg.line_ids.append(self.canvas.create_line(sx1, sy1, sx2, sy2, fill=line_color, width=line_width, tags=("duct_line",)))
             
-            # 수직/수평 판단 (그리기용)
+            # 텍스트 위치 계산 (세로선이면 오른쪽, 가로선이면 아래쪽)
             is_vert_draw = abs(sx1 - sx2) < abs(sy1 - sy2)
             
             leader_length_px = 15
             text_offset_px = 5
-            text_tags = ("duct_text",)
+            text_tags = ("duct_text",) # 클릭 감지용 태그
 
             if is_vert_draw: # 세로선
                 mid_sx = sx1
@@ -295,6 +309,7 @@ class Palette:
                 tx, ty = hx, hy - leader_length_px - text_offset_px
                 seg.text_id = self.canvas.create_text(tx, ty, text=seg.label_text, fill="blue", font=("Arial", 8), anchor="s", tags=text_tags)
 
+        # 툴팁 그리기
         if self.current_mouse_model is not None:
             self._draw_tooltip()
 
@@ -375,6 +390,7 @@ class Palette:
         self._notify_points_changed()
 
     def on_left_click(self, event):
+        # 1. 덕트 텍스트 클릭 감지 (사이즈 수정 다이얼로그)
         closest_items = self.canvas.find_closest(event.x, event.y, halo=2)
         if closest_items:
             item_id = closest_items[0]
@@ -389,6 +405,7 @@ class Palette:
                     self._edit_duct_size_dialog(target_seg)
                     return
 
+        # 2. Pencil 모드 (라인 그리기 시작)
         if self.mode == "pencil":
             mx, my = self.screen_to_model(event.x, event.y)
             smx, smy = self.snap_model(mx, my)
@@ -401,9 +418,10 @@ class Palette:
             self._preview_line_id = self.canvas.create_line(sx, sy, sx, sy, fill="black", width=2, dash=(4, 2))
             return
 
+        # 3. 점 생성 모드 (Inlet/Outlet 추가)
         mx, my = self.screen_to_model(event.x, event.y)
         seg = self._hit_test_segment(mx, my, tol=0.15)
-        if seg is not None: return
+        if seg is not None: return # 라인 위에는 점 생성 안 함
 
         sx, sy = event.x, event.y
         mx, my = self.screen_to_model(sx, sy)
@@ -422,11 +440,13 @@ class Palette:
         self._notify_points_changed()
 
     def _edit_duct_size_dialog(self, seg):
+        """덕트 라벨 클릭 시 호출: 고정 변 입력 받아 재계산"""
         try: dp_current = float(resistance_entry.get())
         except: dp_current = 0.1
         if dp_current <= 0:
             messagebox.showerror("오류", "정압값이 유효하지 않습니다.")
             return
+        
         msg = (
             f"현재 구간 풍량: {seg.flow} m³/h\n"
             f"현재 사이즈: {seg.duct_w_mm} x {seg.duct_h_mm}\n\n"
@@ -618,6 +638,7 @@ class Palette:
 
     def auto_complete(self, dp: float, use_fixed: bool, fixed_val: float, aspect_r: float):
         if not self.segments: return
+        # 1. 스냅
         eps = 1e-6
         def key_of(x, y, eps=eps): return (round(x/eps)*eps, round(y/eps)*eps)
         reps = {}
@@ -632,6 +653,7 @@ class Palette:
 
         self._orthogonalize_segments()
 
+        # 2. Outlet 연결 (Auto-Branch)
         outlet_points = [p for p in self.points if getattr(p, 'kind', None) == 'outlet']
         duct_endpoints = []
         for seg in self.segments:
@@ -664,6 +686,7 @@ class Palette:
             self.segments.append(DuctSegment(nearest[0], nearest[1], mid_x, mid_y, label, w, h, q, vertical_only=(nearest[0]==mid_x)))
             self.segments.append(DuctSegment(mid_x, mid_y, ox, oy, label, w, h, q, vertical_only=(mid_x==ox)))
 
+        # 3. 고아 제거
         def endpoints(seg): return [(seg.mx1, seg.my1), (seg.mx2, seg.my2)]
         deg = {}
         for seg in self.segments:
@@ -680,6 +703,8 @@ class Palette:
             if ok: kept.append(seg)
         self.segments = kept
         self._ensure_inlet_connected()
+        
+        # 4. 리사이징 (현재 GUI 설정 적용)
         for seg in self.segments:
             w, h, label = perform_sizing(seg.flow, dp, use_fixed, fixed_val, aspect_r)
             seg.duct_w_mm = w; seg.duct_h_mm = h; seg.label_text = label
@@ -754,6 +779,7 @@ class Palette:
             self.segments.append(DuctSegment(cur_x, cur_y, cur_x, py, "", 0, 0, 0.0, True))
 
     def draw_duct_network(self, dp_mmAq_per_m: float, use_fixed: bool, fixed_val: float, aspect_ratio: float):
+        """종합 사이징: 자동 방향 감지 및 헤더 그룹화 적용"""
         if len(self.points) < 2:
             messagebox.showwarning("경고", "점이 2개 이상 있어야 종합 사이징을 할 수 있습니다.")
             return
@@ -777,14 +803,17 @@ class Palette:
             w, h, label = perform_sizing(flow, dp_mmAq_per_m, use_fixed, fixed_val, aspect_ratio)
             self.segments.append(DuctSegment(x1, y1, x2, y2, label, w, h, flow, is_vert))
 
+        # 1. 방향 자동 감지 (Vertical or Horizontal Main?)
         sum_dx = sum(abs(p.mx - inlet.mx) for p in outlets)
         sum_dy = sum(abs(p.my - inlet.my) for p in outlets)
         is_vertical_main = sum_dy > sum_dx
 
+        # 2. 그룹핑 (Groups)
         groups = {}
         tol = 0.1
 
         if is_vertical_main:
+            # 수직 메인 -> X좌표가 비슷한 것끼리 그룹핑
             for ot in outlets:
                 found_key = None
                 for k in groups.keys():
@@ -792,6 +821,7 @@ class Palette:
                 if found_key is None: groups[ot.mx] = [ot]
                 else: groups[found_key].append(ot)
         else:
+            # 수평 메인 -> Y좌표가 비슷한 것끼리 그룹핑
             for ot in outlets:
                 found_key = None
                 for k in groups.keys():
@@ -799,11 +829,14 @@ class Palette:
                 if found_key is None: groups[ot.my] = [ot]
                 else: groups[found_key].append(ot)
 
+        # 3. 메인 노드(Main Nodes) 생성
         main_nodes = [] 
 
         if is_vertical_main:
+            # 메인 축: Inlet X (x_main)
             for grp_x, grp_outlets in groups.items():
                 grp_flow = sum(o.flow for o in grp_outlets)
+                # 분기점(Take-off): 그룹 내에서 Inlet Y와 가장 가까운 Y
                 takeoff_y = min(grp_outlets, key=lambda o: abs(o.my - inlet.my)).my
                 main_nodes.append({'pos': takeoff_y, 'flow': grp_flow, 'grp_coord': grp_x, 'outlets': grp_outlets})
             
@@ -813,6 +846,7 @@ class Palette:
             up_nodes = [n for n in main_nodes if n['pos'] < inlet.my - 1e-6]
             down_nodes = [n for n in main_nodes if n['pos'] > inlet.my + 1e-6]
             
+            # Upstream Main
             if up_nodes:
                 up_nodes.sort(key=lambda n: n['pos'], reverse=True)
                 curr_y = inlet.my
@@ -823,6 +857,7 @@ class Palette:
                     if current_main_flow <= 0: break
                     create_seg(x_main, up_nodes[i]['pos'], x_main, up_nodes[i+1]['pos'], current_main_flow, True)
 
+            # Downstream Main
             if down_nodes:
                 down_nodes.sort(key=lambda n: n['pos'])
                 curr_y = inlet.my
@@ -833,14 +868,17 @@ class Palette:
                     if current_main_flow <= 0: break
                     create_seg(x_main, down_nodes[i]['pos'], x_main, down_nodes[i+1]['pos'], current_main_flow, True)
 
+            # Branches & Headers
             for node in main_nodes:
                 takeoff_y = node['pos']
                 grp_x = node['grp_coord']
                 grp_outlets = node['outlets']
                 
+                # Riser (Main -> Header)
                 if abs(x_main - grp_x) > 1e-6:
                     create_seg(x_main, takeoff_y, grp_x, takeoff_y, node['flow'], False)
                 
+                # Header (Group Distribution)
                 sorted_outs = sorted(grp_outlets, key=lambda o: o.my)
                 h_up = [o for o in sorted_outs if o.my < takeoff_y - 1e-6]
                 if h_up:
@@ -863,8 +901,10 @@ class Palette:
                         create_seg(grp_x, h_down[i].my, grp_x, h_down[i+1].my, h_flow, True)
 
         else:
+            # 메인 축: Inlet Y (y_main)
             for grp_y, grp_outlets in groups.items():
                 grp_flow = sum(o.flow for o in grp_outlets)
+                # 분기점: 그룹 내에서 Inlet X와 가장 가까운 X
                 takeoff_x = min(grp_outlets, key=lambda o: abs(o.mx - inlet.mx)).mx
                 main_nodes.append({'pos': takeoff_x, 'flow': grp_flow, 'grp_coord': grp_y, 'outlets': grp_outlets})
 
@@ -953,7 +993,7 @@ class Palette:
 
 
 # =========================
-# GUI 이벤트 함수
+# 3. GUI 이벤트 처리
 # =========================
 
 relpos_text_widget = None
@@ -1088,16 +1128,17 @@ def toggle_fixed_side():
         fixed_side_entry.config(state="disabled")
 
 # =========================
-# GUI 구성
+# 4. GUI 레이아웃 구성
 # =========================
 
 root = tk.Tk()
-root.title("덕트 사이징 프로그램 (v2.1 - Grouping & Auto-Orient)")
+root.title("스마트 덕트 사이징 프로그램 (v3.0 - Auto Orientation & Grouping)")
 
 main_frame = tk.Frame(root)
 main_frame.pack(fill="both", expand=True, padx=10, pady=10)
 root.bind("<Control-z>", lambda event: undo_point())
 
+# 좌측 정보 입력창
 info_frame = tk.Frame(main_frame, width=180)
 info_frame.pack(side="left", fill="y", padx=(0,10))
 
@@ -1117,6 +1158,7 @@ right_frame = tk.Frame(main_frame, bg="#f5f5f5", bd=1, relief="solid")
 right_frame.configure(width=700)
 right_frame.pack(side="right", fill="both", expand=True)
 
+# 제어 패널
 row_idx = 0
 tk.Label(left_frame, text="풍량 (m³/h):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
 cubic_meter_hour_entry = tk.Entry(left_frame, width=10)
@@ -1136,6 +1178,7 @@ aspect_ratio_combo.current(1)
 aspect_ratio_combo.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
 row_idx += 1
 
+# 한 변 고정 옵션
 fixed_side_var = tk.BooleanVar(value=False)
 fixed_chk = tk.Checkbutton(left_frame, text="한 변 고정(mm):", variable=fixed_side_var, command=toggle_fixed_side)
 fixed_chk.grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
@@ -1145,6 +1188,7 @@ fixed_side_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
 fixed_side_entry.insert(0, "300")
 row_idx += 1
 
+# 버튼들
 tk.Button(left_frame, text="계산하기", command=calculate).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
 tk.Button(left_frame, text="균등 풍량 배분", command=equal_distribution).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
 tk.Button(left_frame, text="종합 사이징", command=total_sizing).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
@@ -1154,6 +1198,7 @@ tk.Button(left_frame, text="펜슬 모드", command=lambda: palette.set_mode_pen
 tk.Button(left_frame, text="자동완성", command=auto_complete_action).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
 row_idx += 1
 
+# 결과 출력창
 results_frame = tk.Frame(left_frame)
 results_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
 left_frame.grid_rowconfigure(row_idx, weight=1)
@@ -1165,6 +1210,7 @@ results_text_widget.configure(yscrollcommand=results_scrollbar.set)
 results_text_widget.config(state="disabled")
 row_idx += 1
 
+# 통계 출력창
 relpos_frame = tk.Frame(left_frame)
 relpos_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=(0, 5), sticky="nsew")
 tk.Label(relpos_frame, text="Outlet 상대 위치 통계 (inlet - outlet):").pack(anchor="w")
@@ -1172,6 +1218,7 @@ relpos_text_widget = tk.Text(relpos_frame, width=36, height=6, wrap="word", bg="
 relpos_text_widget.pack(fill="both", expand=True)
 relpos_text_widget.config(state="disabled")
 
+# 팔레트 초기화
 palette = Palette(right_frame)
 palette.points_changed_callback = update_outlet_calculations
 update_outlet_calculations(palette)
