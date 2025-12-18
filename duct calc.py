@@ -1323,9 +1323,47 @@ def get_sizing_params():
     except: r = 2.0
     return dp, use_fixed, fixed_val, r
 
+
+def format_cubic_meter_entry(event=None):
+    """Format `cubic_meter_hour_entry` value with thousand separators while typing."""
+    global cubic_meter_hour_entry
+    try:
+        s = cubic_meter_hour_entry.get()
+    except Exception:
+        return
+    if s is None: return
+    # remove existing commas
+    raw = s.replace(',', '')
+    if raw in ('', '-', '.', '-.'): return
+    neg = raw.startswith('-')
+    if neg:
+        raw2 = raw[1:]
+    else:
+        raw2 = raw
+    parts = raw2.split('.')
+    int_part = parts[0] if parts[0] != '' else '0'
+    try:
+        intval = int(int_part)
+    except Exception:
+        return
+    int_fmt = f"{intval:,}"
+    if neg: int_fmt = '-' + int_fmt
+    if len(parts) > 1:
+        frac = parts[1]
+        new = int_fmt + '.' + frac
+    else:
+        new = int_fmt
+
+    if new != s:
+        # update entry and move cursor to end for simplicity
+        cubic_meter_hour_entry.delete(0, 'end')
+        cubic_meter_hour_entry.insert(0, new)
+        try: cubic_meter_hour_entry.icursor('end')
+        except: pass
+
 def calculate():
     try:
-        q = float(cubic_meter_hour_entry.get())
+        q = float(cubic_meter_hour_entry.get().replace(',', ''))
         dp, use_fixed, fixed_val, r = get_sizing_params()
 
         D1 = calc_circular_diameter(q, dp)
@@ -1399,7 +1437,7 @@ def clear_palette(): palette.clear_all()
 
 def equal_distribution():
     try:
-        q = float(cubic_meter_hour_entry.get())
+        q = float(cubic_meter_hour_entry.get().replace(',', ''))
         palette.set_inlet_flow(q)
     except:
         messagebox.showerror("입력 오류", "풍량 값을 확인하세요.")
@@ -1456,7 +1494,13 @@ def create_app():
     tk.Label(left_frame, text="풍량 (m³/h):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
     cubic_meter_hour_entry = tk.Entry(left_frame, width=10)
     cubic_meter_hour_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
-    cubic_meter_hour_entry.insert(0, "5000")
+    cubic_meter_hour_entry.insert(0, "50000")
+    # format while typing and on focus out
+    cubic_meter_hour_entry.bind('<KeyRelease>', lambda e: format_cubic_meter_entry(e))
+    cubic_meter_hour_entry.bind('<FocusOut>', lambda e: format_cubic_meter_entry(e))
+    # format initial value
+    try: format_cubic_meter_entry(None)
+    except: pass
     row_idx += 1
 
     tk.Label(left_frame, text="정압값 (mmAq/m):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
