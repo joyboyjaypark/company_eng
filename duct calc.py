@@ -1,5 +1,7 @@
 import tkinter as tk
 from tkinter import messagebox, ttk, simpledialog
+import copy
+from collections import deque, defaultdict
 import math
 
 # =========================
@@ -188,6 +190,10 @@ class Palette:
 
         self.points_changed_callback = None
 
+        # Undo stack: store snapshots of (points, segments, inlet_flow)
+        self._undo_stack = []
+        self._undo_limit = 100
+
         # 이벤트 바인딩
         self.canvas.bind("<Button-1>", self.on_left_click)
         self.canvas.bind("<Button-3>", self.on_right_click)
@@ -208,6 +214,54 @@ class Palette:
         if callable(cb):
             try: cb(self)
             except: pass
+        # notify sheet/segment-related changes as well
+        cb2 = getattr(self, "sheet_changed_callback", None)
+        if callable(cb2):
+            try: cb2(self)
+            except: pass
+
+    def _snapshot(self):
+        return {
+            'points': copy.deepcopy(self.points),
+            'segments': copy.deepcopy(self.segments),
+            'inlet_flow': self.inlet_flow,
+        }
+
+    def push_undo(self):
+        try:
+            snap = self._snapshot()
+            self._undo_stack.append(snap)
+            if len(self._undo_stack) > self._undo_limit:
+                self._undo_stack.pop(0)
+        except Exception:
+            pass
+
+    def _restore_snapshot(self, snap):
+        if not snap: return
+        self.points = copy.deepcopy(snap.get('points', []))
+        self.segments = copy.deepcopy(snap.get('segments', []))
+        self.inlet_flow = snap.get('inlet_flow', 0.0)
+        # clear canvas-related ids and transient flags
+        for p in self.points:
+            try:
+                p.canvas_id = None; p.text_id = None
+            except: pass
+        for seg in self.segments:
+            try:
+                seg.line_ids = []
+                seg.text_id = None
+                seg.leader_id = None
+                seg.is_hovered = False
+                seg.is_dragging = False
+                seg.drag_start_model = None
+            except: pass
+        self.redraw_all()
+        self._notify_points_changed()
+
+    def undo(self):
+        if not self._undo_stack: return
+        snap = self._undo_stack.pop()
+        self._restore_snapshot(snap)
 
     def set_mode_pencil(self):
         if self.mode == "pencil":
@@ -382,6 +436,7 @@ class Palette:
         return None
 
     def set_inlet_flow(self, flow):
+        self.push_undo()
         self.inlet_flow = float(flow)
         if self.points:
             p0 = self.points[0]
@@ -427,6 +482,8 @@ class Palette:
         mx, my = self.screen_to_model(sx, sy)
         mx, my = self.snap_model(mx, my)
 
+        # 기록 후 점 추가
+        self.push_undo()
         if not self.points:
             flow = self.inlet_flow if self.inlet_flow > 0 else 0.0
             p = AirPoint(mx, my, "inlet", flow)
@@ -455,15 +512,36 @@ class Palette:
         )
         val = simpledialog.askinteger("덕트 사이즈 변경", msg, minvalue=50, maxvalue=5000)
         if val:
+            self.push_undo()
             w, h, label = perform_sizing(seg.flow, dp_current, True, float(val), 1.0)
             seg.duct_w_mm = w
             seg.duct_h_mm = h
             seg.label_text = label
             self.redraw_all()
+            self._notify_points_changed()
 
     def on_right_click(self, event):
         sx, sy = event.x, event.y
         mx, my = self.screen_to_model(sx, sy)
+
+        # 우클릭: 펜슬 모드에서 라인 근처면 해당 라인 삭제
+        if self.mode == "pencil":
+            seg_hit = self._hit_test_segment(mx, my, tol=0.15)
+            if seg_hit is not None:
+                self.push_undo()
+                try:
+                    self.segments.remove(seg_hit)
+                except ValueError:
+                    pass
+                # after removal, merge colinear neighbors if branch node disappeared
+                try:
+                    self._merge_colinear_neighbors()
+                except Exception:
+                    pass
+                self.redraw_all()
+                self._notify_points_changed()
+                return
+
         target = self._find_point_near_model(mx, my, tol_model=0.3)
         if target is None: return
 
@@ -488,6 +566,7 @@ class Palette:
         except ValueError:
             messagebox.showerror("입력 오류", "0 이상 숫자로 입력해주세요.")
             return
+        self.push_undo()
         target.flow = new_flow
         self.segments.clear()
         self.redraw_all()
@@ -573,6 +652,8 @@ class Palette:
         if self.dragging_segment is None:
             seg = self._hit_test_segment(mx, my, tol=0.15)
             if seg is None: return
+            # record state before starting a drag operation
+            self.push_undo()
             self.dragging_segment = seg
             seg.is_dragging = True
             seg.drag_start_model = (mx, my)
@@ -619,6 +700,7 @@ class Palette:
             else:
                 x2 = x1; vertical = True
             seg = DuctSegment(x1, y1, x2, y2, "", 0, 0, 0.0, vertical)
+            self.push_undo()
             self.segments.append(seg)
             if self._preview_line_id is not None:
                 self.canvas.delete(self._preview_line_id)
@@ -628,6 +710,7 @@ class Palette:
             self._orthogonalize_segments()
             self._ensure_inlet_connected()
             self.redraw_all()
+            self._notify_points_changed()
             return
 
         if self.dragging_segment is not None:
@@ -637,6 +720,8 @@ class Palette:
         self.on_mouse_move(event)
 
     def auto_complete(self, dp: float, use_fixed: bool, fixed_val: float, aspect_r: float):
+        # record state for undo
+        self.push_undo()
         if not self.segments: return
         # 1. 스냅
         eps = 1e-6
@@ -652,6 +737,9 @@ class Palette:
             seg.mx2, seg.my2 = reps.get(k2, (seg.mx2, seg.my2))
 
         self._orthogonalize_segments()
+
+        # 1.5 Split intersections so crossing segments create branch nodes
+        self._split_intersections()
 
         # 2. Outlet 연결 (Auto-Branch)
         outlet_points = [p for p in self.points if getattr(p, 'kind', None) == 'outlet']
@@ -704,11 +792,118 @@ class Palette:
         self.segments = kept
         self._ensure_inlet_connected()
         
-        # 4. 리사이징 (현재 GUI 설정 적용)
+        # 4. 리사이징: 각 세그먼트의 실제 유량(아래쪽 outlet 합)을 계산하여 사이징
+        # Build node mapping (use rounded keys to avoid float issues)
+        def node_key(x, y, eps=1e-6):
+            return (round(x/eps)*eps, round(y/eps)*eps)
+
+        # map node -> list of (neighbor_node, segment)
+        adj = defaultdict(list)
+        seg_by_ends = {}
         for seg in self.segments:
-            w, h, label = perform_sizing(seg.flow, dp, use_fixed, fixed_val, aspect_r)
+            n1 = node_key(seg.mx1, seg.my1)
+            n2 = node_key(seg.mx2, seg.my2)
+            adj[n1].append((n2, seg))
+            adj[n2].append((n1, seg))
+            seg_by_ends[(n1, n2)] = seg
+            seg_by_ends[(n2, n1)] = seg
+
+        # locate inlet node
+        inlet_node = None
+        if self.points:
+            inlet = self.points[0]
+            inlet_node = node_key(inlet.mx, inlet.my)
+
+        # accumulate flows per segment by finding path from each outlet to inlet
+        seg_flow_acc = defaultdict(float)
+        outlets = [p for p in self.points if getattr(p, 'kind', None) == 'outlet' and getattr(p, 'flow', 0.0) > 0]
+        for out in outlets:
+            start = node_key(out.mx, out.my)
+            if inlet_node is None or start not in adj:
+                continue
+            # BFS to find path to inlet
+            q = deque([start])
+            parent = {start: None}
+            parent_seg = {}
+            found = False
+            while q:
+                cur = q.popleft()
+                if cur == inlet_node:
+                    found = True
+                    break
+                for (nbr, seg) in adj.get(cur, []):
+                    if nbr in parent: continue
+                    parent[nbr] = cur
+                    parent_seg[nbr] = seg
+                    q.append(nbr)
+            if not found:
+                continue
+            # walk back from inlet to start, adding flow to each segment encountered
+            node = inlet_node
+            while True:
+                prev = parent.get(node)
+                if prev is None:
+                    break
+                seg = parent_seg.get(node)
+                if seg is not None:
+                    seg_flow_acc[seg] += out.flow
+                node = prev
+
+        # assign accumulated flows and compute sizing
+        for seg in self.segments:
+            f = seg_flow_acc.get(seg, 0.0)
+            seg.flow = f
+            w, h, label = perform_sizing(f, dp, use_fixed, fixed_val, aspect_r)
             seg.duct_w_mm = w; seg.duct_h_mm = h; seg.label_text = label
         self.redraw_all()
+        self._notify_points_changed()
+
+    def _split_intersections(self):
+        # Split orthogonal segment intersections to create true graph nodes
+        if not self.segments: return
+        eps = 1e-9
+        segs = list(self.segments)
+        result = []
+        for a in segs:
+            split_points = [(a.mx1, a.my1), (a.mx2, a.my2)]
+            for b in segs:
+                if a is b: continue
+                if a.vertical_only == b.vertical_only: continue
+                if a.vertical_only:
+                    vx = a.mx1
+                    vy0, vy1 = min(a.my1, a.my2), max(a.my1, a.my2)
+                    hy = b.my1
+                    hx0, hx1 = min(b.mx1, b.mx2), max(b.mx1, b.mx2)
+                    if (hx0 - eps) <= vx <= (hx1 + eps) and (vy0 - eps) <= hy <= (vy1 + eps):
+                        split_points.append((vx, hy))
+                else:
+                    vx = b.mx1
+                    vy0, vy1 = min(b.my1, b.my2), max(b.my1, b.my2)
+                    hy = a.my1
+                    hx0, hx1 = min(a.mx1, a.mx2), max(a.mx1, a.mx2)
+                    if (hx0 - eps) <= vx <= (hx1 + eps) and (vy0 - eps) <= hy <= (vy1 + eps):
+                        split_points.append((vx, hy))
+            # unique and sorted
+            if a.vertical_only:
+                pts = sorted(set(split_points), key=lambda p: p[1])
+            else:
+                pts = sorted(set(split_points), key=lambda p: p[0])
+            if len(pts) <= 1:
+                continue
+            # reuse original object for first piece
+            x1,y1 = pts[0]
+            x2,y2 = pts[1]
+            a.mx1, a.my1, a.mx2, a.my2 = x1, y1, x2, y2
+            result.append(a)
+            # create additional pieces
+            for k in range(1, len(pts)-1):
+                xx1,yy1 = pts[k]
+                xx2,yy2 = pts[k+1]
+                if abs(xx1-xx2) < eps and abs(yy1-yy2) < eps: continue
+                new_seg = DuctSegment(xx1, yy1, xx2, yy2, a.label_text, a.duct_w_mm, a.duct_h_mm, a.flow, a.vertical_only)
+                result.append(new_seg)
+        if result:
+            self.segments = result
 
     def _move_connected_segments(self, base_seg, dx, dy):
         def seg_endpoints(seg): return [(seg.mx1, seg.my1), (seg.mx2, seg.my2)]
@@ -778,8 +973,74 @@ class Palette:
         if abs(py - cur_y) > 1e-9:
             self.segments.append(DuctSegment(cur_x, cur_y, cur_x, py, "", 0, 0, 0.0, True))
 
+    def _merge_colinear_neighbors(self):
+        # Merge adjacent colinear segments when their connecting node has degree 2
+        if not self.segments:
+            return
+        eps = 1e-9
+        def node_key(x, y):
+            return (round(x, 9), round(y, 9))
+
+        attached_points = {(p.mx, p.my) for p in self.points}
+
+        changed = True
+        while changed:
+            changed = False
+            # build node -> segments map
+            node_map = {}
+            for seg in self.segments:
+                n1 = node_key(seg.mx1, seg.my1)
+                n2 = node_key(seg.mx2, seg.my2)
+                node_map.setdefault(n1, []).append(seg)
+                node_map.setdefault(n2, []).append(seg)
+
+            # find candidate nodes to collapse
+            for node, segs in list(node_map.items()):
+                if node in attached_points: continue
+                if len(segs) != 2: continue
+                s1, s2 = segs[0], segs[1]
+                # must be same orientation
+                if s1.vertical_only != s2.vertical_only:
+                    continue
+                # compute endpoints other than node
+                def other_end(s, n):
+                    if abs(s.mx1 - n[0]) < eps and abs(s.my1 - n[1]) < eps:
+                        return (s.mx2, s.my2)
+                    else:
+                        return (s.mx1, s.my1)
+
+                o1 = other_end(s1, node)
+                o2 = other_end(s2, node)
+
+                # ensure colinear alignment (for vertical x equal, for horizontal y equal)
+                if s1.vertical_only:
+                    if abs(o1[0] - o2[0]) > 1e-6: continue
+                    new_seg = DuctSegment(o1[0], o1[1], o2[0], o2[1], "", max(s1.duct_w_mm, s2.duct_w_mm), max(s1.duct_h_mm, s2.duct_h_mm), s1.flow + s2.flow, True)
+                else:
+                    if abs(o1[1] - o2[1]) > 1e-6: continue
+                    new_seg = DuctSegment(o1[0], o1[1], o2[0], o2[1], "", max(s1.duct_w_mm, s2.duct_w_mm), max(s1.duct_h_mm, s2.duct_h_mm), s1.flow + s2.flow, False)
+
+                # remove originals and add new
+                try:
+                    self.segments.remove(s1)
+                    self.segments.remove(s2)
+                except ValueError:
+                    continue
+                self.segments.append(new_seg)
+                changed = True
+                break
+
+        if changed:
+            self._orthogonalize_segments()
+            self._ensure_inlet_connected()
+            self.redraw_all()
+            self._notify_points_changed()
+
     def draw_duct_network(self, dp_mmAq_per_m: float, use_fixed: bool, fixed_val: float, aspect_ratio: float):
         """종합 사이징: 자동 방향 감지 및 헤더 그룹화 적용"""
+        # record state for undo
+        self.push_undo()
+
         if len(self.points) < 2:
             messagebox.showwarning("경고", "점이 2개 이상 있어야 종합 사이징을 할 수 있습니다.")
             return
@@ -963,15 +1224,14 @@ class Palette:
                         create_seg(h_right[i].mx, grp_y, h_right[i+1].mx, grp_y, h_flow, False)
 
         self.redraw_all()
-
-    def undo_last_point(self):
-        if not self.points: return
-        self.points.pop()
-        self.segments.clear()
-        self.redraw_all()
         self._notify_points_changed()
 
+    def undo_last_point(self):
+        # backward compatibility: perform a full undo
+        self.undo()
+
     def clear_all(self):
+        self.push_undo()
         self.points.clear()
         self.segments.clear()
         self.redraw_all()
@@ -981,6 +1241,7 @@ class Palette:
         if len(self.points) < 2:
             messagebox.showwarning("경고", "최소 2개 이상의 점 필요.")
             return
+        self.push_undo()
         Q_in = self.inlet_flow
         n_out = len(self.points) - 1
         Q_each = Q_in / n_out
@@ -1021,6 +1282,34 @@ def update_outlet_calculations(pal: Palette):
     relpos_text_widget.delete("1.0", "end")
     relpos_text_widget.insert("end", text)
     relpos_text_widget.config(state="disabled")
+
+
+def update_sheet_area(pal: Palette):
+    """Calculate total duct sheet area (m2) from palette segments and update results widget."""
+    global results_text_widget
+    if results_text_widget is None: return
+    total_area_m2 = 0.0
+    for seg in getattr(pal, 'segments', []):
+        L = seg.length_m()
+        w_m = getattr(seg, 'duct_w_mm', 0) / 1000.0
+        h_m = getattr(seg, 'duct_h_mm', 0) / 1000.0
+        area = (w_m + h_m) * 2 * L
+        total_area_m2 += area
+
+    # append a new history line showing the latest sheet area
+    results_text_widget.config(state="normal")
+    base = results_text_widget.get("1.0", "end").rstrip()
+    if base:
+        base = base + "\n"
+    base += f"5. 덕트 철판 소요량 (m²) : {total_area_m2:.1f}"
+    results_text_widget.delete("1.0", "end")
+    results_text_widget.insert("end", base)
+    results_text_widget.config(state="disabled")
+    try:
+        results_text_widget.see("end")
+    except Exception:
+        try: results_text_widget.yview_moveto(1.0)
+        except: pass
 
 def get_sizing_params():
     try: dp = float(resistance_entry.get())
@@ -1131,96 +1420,107 @@ def toggle_fixed_side():
 # 4. GUI 레이아웃 구성
 # =========================
 
-root = tk.Tk()
-root.title("스마트 덕트 사이징 프로그램 (v3.0 - Auto Orientation & Grouping)")
+def create_app():
+    root = tk.Tk()
+    root.title("스마트 덕트 사이징 프로그램 (v3.0 - Auto Orientation & Grouping)")
 
-main_frame = tk.Frame(root)
-main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-root.bind("<Control-z>", lambda event: undo_point())
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    root.bind("<Control-z>", lambda event: undo_point())
+    # expose commonly used widgets as module-level globals so callbacks can access them
+    global cubic_meter_hour_entry, resistance_entry, aspect_ratio_combo, fixed_side_var, fixed_side_entry
+    global results_text_widget, relpos_text_widget, palette
 
-# 좌측 정보 입력창
-info_frame = tk.Frame(main_frame, width=180)
-info_frame.pack(side="left", fill="y", padx=(0,10))
+    # 좌측 정보 입력창
+    info_frame = tk.Frame(main_frame, width=180)
+    info_frame.pack(side="left", fill="y", padx=(0,10))
 
-tk.Label(info_frame, text="외기/실내/급기/발열량", font=("Arial", 10, "bold")).pack(anchor="w", pady=(6,4))
-labels = ["외기온도 (°C):", "실내온도 (°C):", "급기온도 (°C):", "일반 발열량 (W/m²):", "장비 발열량 (W/m²):"]
-defaults = ["-5.0", "25.0", "18.0", "0.00", "0.00"]
-for lbl, dft in zip(labels, defaults):
-    tk.Label(info_frame, text=lbl).pack(anchor="w")
-    e = tk.Entry(info_frame, width=10)
-    e.pack(anchor="w", pady=2)
-    e.insert(0, dft)
+    tk.Label(info_frame, text="외기/실내/급기/발열량", font=("Arial", 10, "bold")).pack(anchor="w", pady=(6,4))
+    labels = ["외기온도 (°C):", "실내온도 (°C):", "급기온도 (°C):", "일반 발열량 (W/m²):", "장비 발열량 (W/m²):"]
+    defaults = ["-5.0", "25.0", "18.0", "0.00", "0.00"]
+    for lbl, dft in zip(labels, defaults):
+        tk.Label(info_frame, text=lbl).pack(anchor="w")
+        e = tk.Entry(info_frame, width=10)
+        e.pack(anchor="w", pady=2)
+        e.insert(0, dft)
 
-left_frame = tk.Frame(main_frame)
-left_frame.pack(side="left", anchor="w")
+    left_frame = tk.Frame(main_frame)
+    left_frame.pack(side="left", anchor="w")
 
-right_frame = tk.Frame(main_frame, bg="#f5f5f5", bd=1, relief="solid")
-right_frame.configure(width=700)
-right_frame.pack(side="right", fill="both", expand=True)
+    right_frame = tk.Frame(main_frame, bg="#f5f5f5", bd=1, relief="solid")
+    right_frame.configure(width=700)
+    right_frame.pack(side="right", fill="both", expand=True)
 
-# 제어 패널
-row_idx = 0
-tk.Label(left_frame, text="풍량 (m³/h):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-cubic_meter_hour_entry = tk.Entry(left_frame, width=10)
-cubic_meter_hour_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
-cubic_meter_hour_entry.insert(0, "5000")
-row_idx += 1
+    # 제어 패널
+    row_idx = 0
+    tk.Label(left_frame, text="풍량 (m³/h):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    cubic_meter_hour_entry = tk.Entry(left_frame, width=10)
+    cubic_meter_hour_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    cubic_meter_hour_entry.insert(0, "5000")
+    row_idx += 1
 
-tk.Label(left_frame, text="정압값 (mmAq/m):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-resistance_entry = tk.Entry(left_frame, width=10)
-resistance_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
-resistance_entry.insert(0, "0.1")
-row_idx += 1
+    tk.Label(left_frame, text="정압값 (mmAq/m):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    resistance_entry = tk.Entry(left_frame, width=10)
+    resistance_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    resistance_entry.insert(0, "0.1")
+    row_idx += 1
 
-tk.Label(left_frame, text="사각 덕트 종횡비 (b/a):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-aspect_ratio_combo = ttk.Combobox(left_frame, values=["1", "2", "3", "4"], state="readonly", width=5)
-aspect_ratio_combo.current(1)
-aspect_ratio_combo.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
-row_idx += 1
+    tk.Label(left_frame, text="사각 덕트 종횡비 (b/a):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    aspect_ratio_combo = ttk.Combobox(left_frame, values=["1", "2", "3", "4"], state="readonly", width=5)
+    aspect_ratio_combo.current(1)
+    aspect_ratio_combo.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    row_idx += 1
 
-# 한 변 고정 옵션
-fixed_side_var = tk.BooleanVar(value=False)
-fixed_chk = tk.Checkbutton(left_frame, text="한 변 고정(mm):", variable=fixed_side_var, command=toggle_fixed_side)
-fixed_chk.grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    # 한 변 고정 옵션
+    fixed_side_var = tk.BooleanVar(value=False)
+    fixed_chk = tk.Checkbutton(left_frame, text="한 변 고정(mm):", variable=fixed_side_var, command=toggle_fixed_side)
+    fixed_chk.grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
 
-fixed_side_entry = tk.Entry(left_frame, width=10, state="disabled")
-fixed_side_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
-fixed_side_entry.insert(0, "300")
-row_idx += 1
+    fixed_side_entry = tk.Entry(left_frame, width=10, state="disabled")
+    fixed_side_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    fixed_side_entry.insert(0, "300")
+    row_idx += 1
 
-# 버튼들
-tk.Button(left_frame, text="계산하기", command=calculate).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
-tk.Button(left_frame, text="균등 풍량 배분", command=equal_distribution).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
-tk.Button(left_frame, text="종합 사이징", command=total_sizing).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
-tk.Button(left_frame, text="팔레트 전체 지우기", command=clear_palette).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
+    # 버튼들
+    tk.Button(left_frame, text="계산하기", command=calculate).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
+    tk.Button(left_frame, text="균등 풍량 배분", command=equal_distribution).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
+    tk.Button(left_frame, text="종합 사이징", command=total_sizing).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
+    tk.Button(left_frame, text="팔레트 전체 지우기", command=clear_palette).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
 
-tk.Button(left_frame, text="펜슬 모드", command=lambda: palette.set_mode_pencil()).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-tk.Button(left_frame, text="자동완성", command=auto_complete_action).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
-row_idx += 1
+    tk.Button(left_frame, text="펜슬 모드", command=lambda: palette.set_mode_pencil()).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    tk.Button(left_frame, text="자동완성", command=auto_complete_action).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    row_idx += 1
 
-# 결과 출력창
-results_frame = tk.Frame(left_frame)
-results_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
-left_frame.grid_rowconfigure(row_idx, weight=1)
-results_text_widget = tk.Text(results_frame, width=36, height=8, wrap="word", bg="white", relief="solid")
-results_text_widget.pack(side="left", fill="both", expand=True)
-results_scrollbar = tk.Scrollbar(results_frame, orient="vertical", command=results_text_widget.yview)
-results_scrollbar.pack(side="right", fill="y")
-results_text_widget.configure(yscrollcommand=results_scrollbar.set)
-results_text_widget.config(state="disabled")
-row_idx += 1
+    # 결과 출력창
+    results_frame = tk.Frame(left_frame)
+    results_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+    left_frame.grid_rowconfigure(row_idx, weight=1)
+    results_text_widget = tk.Text(results_frame, width=36, height=8, wrap="word", bg="white", relief="solid")
+    results_text_widget.pack(side="left", fill="both", expand=True)
+    results_scrollbar = tk.Scrollbar(results_frame, orient="vertical", command=results_text_widget.yview)
+    results_scrollbar.pack(side="right", fill="y")
+    results_text_widget.configure(yscrollcommand=results_scrollbar.set)
+    results_text_widget.config(state="disabled")
+    row_idx += 1
 
-# 통계 출력창
-relpos_frame = tk.Frame(left_frame)
-relpos_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=(0, 5), sticky="nsew")
-tk.Label(relpos_frame, text="Outlet 상대 위치 통계 (inlet - outlet):").pack(anchor="w")
-relpos_text_widget = tk.Text(relpos_frame, width=36, height=6, wrap="word", bg="white", relief="solid")
-relpos_text_widget.pack(fill="both", expand=True)
-relpos_text_widget.config(state="disabled")
+    # 통계 출력창
+    relpos_frame = tk.Frame(left_frame)
+    relpos_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=(0, 5), sticky="nsew")
+    tk.Label(relpos_frame, text="Outlet 상대 위치 통계 (inlet - outlet):").pack(anchor="w")
+    relpos_text_widget = tk.Text(relpos_frame, width=36, height=6, wrap="word", bg="white", relief="solid")
+    relpos_text_widget.pack(fill="both", expand=True)
+    relpos_text_widget.config(state="disabled")
 
-# 팔레트 초기화
-palette = Palette(right_frame)
-palette.points_changed_callback = update_outlet_calculations
-update_outlet_calculations(palette)
+    # 팔레트 초기화
+    global palette
+    palette = Palette(right_frame)
+    palette.points_changed_callback = update_outlet_calculations
+    palette.sheet_changed_callback = update_sheet_area
+    update_outlet_calculations(palette)
+    update_sheet_area(palette)
 
-root.mainloop()
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    create_app()
