@@ -1563,26 +1563,25 @@ def create_app():
     update_outlet_calculations(palette)
     update_sheet_area(palette)
 
-    # --- 시작 시 창 가로 크기를 30% 늘리고, 그 증가분을 전부 팔레트(right_frame)에 할당
+    # 시작 시: 전체 창 너비를 현재 값의 +30%로 늘리고, 그 증가분을 전부 팔레트(right_frame)에 할당
     try:
         root.update_idletasks()
         base_w = root.winfo_width() or root.winfo_reqwidth() or 1000
         base_h = root.winfo_height() or root.winfo_reqheight() or 700
         delta = int(base_w * 0.3)
 
-        # 현재 right_frame 너비 측정 및 증가분 적용
+        # 현재 right_frame 너비를 측정해 증가분을 적용
         try:
-            curr_right = right_frame.winfo_width()
-            if not curr_right or curr_right <= 1:
-                curr_right = 700
+            curr_rf = right_frame.winfo_width()
+            if not curr_rf or curr_rf <= 1:
+                curr_rf = 700
         except Exception:
-            curr_right = 700
+            curr_rf = 700
         try:
-            right_frame.configure(width=curr_right + delta)
+            right_frame.configure(width=curr_rf + delta)
         except Exception:
             pass
 
-        # 윈도우 전체 크기 강제 설정
         try:
             root.geometry(f"{base_w + delta}x{base_h}")
         except Exception:
