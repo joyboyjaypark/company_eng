@@ -175,7 +175,7 @@ class Palette:
         self.segments = []
 
         # 그리기 모드
-        self.mode = "pan"  # "pan" or "pencil"
+        self.mode = "pan"  # "pan", "pencil", "eraser"
         self._drawing = False
         self._draw_start = None
         self._preview_line_id = None
@@ -187,6 +187,8 @@ class Palette:
         self.current_mouse_model = None
 
         self.points_changed_callback = None
+        # 지우개 모드
+        self.erase_mode = False
 
         # 이벤트 바인딩
         self.canvas.bind("<Button-1>", self.on_left_click)
@@ -202,6 +204,21 @@ class Palette:
         self.canvas.bind("<ButtonRelease-1>", self.on_left_release)
 
         self.redraw_all()
+
+    def set_mode_eraser(self):
+        """지우개 모드 토글: 활성화되면 클릭으로 근처 덕트 구간을 삭제합니다."""
+        if self.mode == "eraser":
+            # turn off
+            self.mode = "pan"
+            self.erase_mode = False
+            try: self.canvas.config(cursor="arrow")
+            except: pass
+            return
+        # enable eraser
+        self.mode = "eraser"
+        self.erase_mode = True
+        try: self.canvas.config(cursor="tcross")
+        except: pass
 
     def _notify_points_changed(self):
         cb = getattr(self, "points_changed_callback", None)
@@ -396,14 +413,39 @@ class Palette:
             item_id = closest_items[0]
             tags = self.canvas.gettags(item_id)
             if "duct_text" in tags:
-                target_seg = None
-                for seg in self.segments:
-                    if seg.text_id == item_id:
-                        target_seg = seg
-                        break
-                if target_seg:
-                    self._edit_duct_size_dialog(target_seg)
-                    return
+                # In erase mode, clicking a duct text should delete the segment
+                if self.erase_mode:
+                    target_seg = None
+                    for seg in self.segments:
+                        if seg.text_id == item_id:
+                            target_seg = seg
+                            break
+                    if target_seg:
+                        try: self.segments.remove(target_seg)
+                        except: pass
+                        self.redraw_all()
+                        self._notify_points_changed()
+                        return
+                else:
+                    target_seg = None
+                    for seg in self.segments:
+                        if seg.text_id == item_id:
+                            target_seg = seg
+                            break
+                    if target_seg:
+                        self._edit_duct_size_dialog(target_seg)
+                        return
+
+        # If eraser mode is active, allow clicking near a segment to delete it
+        if self.erase_mode:
+            mx, my = self.screen_to_model(event.x, event.y)
+            seg = self._hit_test_segment(mx, my, tol=0.15)
+            if seg is not None:
+                try: self.segments.remove(seg)
+                except: pass
+                self.redraw_all()
+                self._notify_points_changed()
+                return
 
         # 2. Pencil 모드 (라인 그리기 시작)
         if self.mode == "pencil":
@@ -1104,6 +1146,9 @@ def auto_complete_action():
         messagebox.showwarning("경고", "고정 변 길이(mm)를 올바르게 입력하세요.")
         return
     palette.auto_complete(dp, use_fixed, fixed_val, r)
+    # After auto-complete, update outlet calculations and redraw
+    update_outlet_calculations(palette)
+    palette.redraw_all()
 
 
 def clear_palette(): palette.clear_all()
@@ -1197,6 +1242,9 @@ tk.Button(left_frame, text="팔레트 전체 지우기", command=clear_palette).
 tk.Button(left_frame, text="펜슬 모드", command=lambda: palette.set_mode_pencil()).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
 tk.Button(left_frame, text="자동완성", command=auto_complete_action).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
 row_idx += 1
+tk.Button(left_frame, text="지우개", command=lambda: palette.set_mode_eraser()).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+row_idx += 1
+row_idx += 1
 
 # 결과 출력창
 results_frame = tk.Frame(left_frame)
@@ -1222,5 +1270,39 @@ relpos_text_widget.config(state="disabled")
 palette = Palette(right_frame)
 palette.points_changed_callback = update_outlet_calculations
 update_outlet_calculations(palette)
+
+# === Startup window width adjustment: increase overall window width by 30%
+# and apply the extra width entirely to the palette (right_frame).
+# We compute current sizes after widgets are laid out, then update.
+try:
+    root.update_idletasks()
+    base_w = root.winfo_width() or root.winfo_reqwidth() or 900
+    base_h = root.winfo_height() or root.winfo_reqheight() or 600
+    # 30% increase
+    delta = int(base_w * 0.3)
+    new_total_w = base_w + delta
+
+    # increase right_frame (palette) width by the delta; fallback to configured value if measurement is 1
+    try:
+        curr_right_w = right_frame.winfo_width()
+        if not curr_right_w or curr_right_w <= 1:
+            # fallback to configured width if widget not yet realized
+            curr_right_w = 700
+    except Exception:
+        curr_right_w = 700
+    new_right_w = curr_right_w + delta
+    try:
+        right_frame.configure(width=new_right_w)
+    except Exception:
+        pass
+
+    # enforce window geometry to the new total width while keeping current height
+    try:
+        root.geometry(f"{new_total_w}x{base_h}")
+    except Exception:
+        pass
+except Exception:
+    # if anything fails, silently continue with default sizing
+    pass
 
 root.mainloop()
