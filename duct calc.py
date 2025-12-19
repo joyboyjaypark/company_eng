@@ -1441,11 +1441,9 @@ def create_app():
     global cubic_meter_hour_entry, resistance_entry, aspect_ratio_combo, fixed_side_var, fixed_side_entry
     global results_text_widget, relpos_text_widget, palette
 
-    # 좌측 정보 입력창
-    info_frame = tk.Frame(main_frame, width=180)
+    # 좌측 정보 입력창 (라벨프레임으로 묶음)
+    info_frame = tk.LabelFrame(main_frame, text="환경 입력", width=180)
     info_frame.pack(side="left", fill="y", padx=(0,10))
-
-    tk.Label(info_frame, text="외기/실내/급기/발열량", font=("Arial", 10, "bold")).pack(anchor="w", pady=(6,4))
     labels = ["외기온도 (°C):", "실내온도 (°C):", "급기온도 (°C):", "일반 발열량 (W/m²):", "장비 발열량 (W/m²):"]
     defaults = ["-5.0", "25.0", "18.0", "0.00", "0.00"]
     for lbl, dft in zip(labels, defaults):
@@ -1454,7 +1452,8 @@ def create_app():
         e.pack(anchor="w", pady=2)
         e.insert(0, dft)
 
-    left_frame = tk.Frame(main_frame)
+    # 덕트 사이징 관련 컨트롤을 라벨프레임으로 묶음
+    left_frame = tk.LabelFrame(main_frame, text="덕트 사이징")
     # 왼쪽 컨트롤을 윈도우 세로 상단에 정렬
     left_frame.pack(side="left", anchor="n", fill="y")
 
@@ -1462,10 +1461,23 @@ def create_app():
     right_frame.configure(width=700)
     right_frame.pack(side="right", fill="both", expand=True)
 
-    # 제어 패널
+    # 제어 패널 (탭으로 묶기)
+    notebook = ttk.Notebook(left_frame)
+    notebook.pack(fill="both", expand=False)
+    tab1 = tk.Frame(notebook)
+    notebook.add(tab1, text="사이징/설정")
+
+    # 추가 탭: 장방형 덕트 두께 설정
+    tab_thickness = tk.Frame(notebook)
+    notebook.add(tab_thickness, text="장방형 덕트 두께")
+    tk.Label(tab_thickness, text="장방형 덕트 두께(mm):").pack(anchor="w", padx=6, pady=(6,2))
+    rect_duct_thickness_entry = tk.Entry(tab_thickness, width=10)
+    rect_duct_thickness_entry.pack(anchor="w", padx=6, pady=(0,6))
+
+    ctrl_parent = tab1
     row_idx = 0
-    tk.Label(left_frame, text="풍량 (m³/h):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-    cubic_meter_hour_entry = tk.Entry(left_frame, width=10)
+    tk.Label(ctrl_parent, text="풍량 (m³/h):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    cubic_meter_hour_entry = tk.Entry(ctrl_parent, width=10)
     cubic_meter_hour_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
     cubic_meter_hour_entry.insert(0, "50000")
     # format while typing and on focus out
@@ -1476,42 +1488,42 @@ def create_app():
     except: pass
     row_idx += 1
 
-    tk.Label(left_frame, text="정압값 (mmAq/m):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-    resistance_entry = tk.Entry(left_frame, width=10)
+    tk.Label(ctrl_parent, text="정압값 (mmAq/m):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    resistance_entry = tk.Entry(ctrl_parent, width=10)
     resistance_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
     resistance_entry.insert(0, "0.1")
     row_idx += 1
 
-    tk.Label(left_frame, text="사각 덕트 종횡비 (b/a):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-    aspect_ratio_combo = ttk.Combobox(left_frame, values=["1", "2", "3", "4"], state="readonly", width=5)
+    tk.Label(ctrl_parent, text="사각 덕트 종횡비 (b/a):").grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    aspect_ratio_combo = ttk.Combobox(ctrl_parent, values=["1", "2", "3", "4"], state="readonly", width=5)
     aspect_ratio_combo.current(1)
     aspect_ratio_combo.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
     row_idx += 1
 
     # 한 변 고정 옵션
     fixed_side_var = tk.BooleanVar(value=False)
-    fixed_chk = tk.Checkbutton(left_frame, text="한 변 고정(mm):", variable=fixed_side_var, command=toggle_fixed_side)
+    fixed_chk = tk.Checkbutton(ctrl_parent, text="한 변 고정(mm):", variable=fixed_side_var, command=toggle_fixed_side)
     fixed_chk.grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
 
-    fixed_side_entry = tk.Entry(left_frame, width=10, state="disabled")
+    fixed_side_entry = tk.Entry(ctrl_parent, width=10, state="disabled")
     fixed_side_entry.grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
     fixed_side_entry.insert(0, "300")
     row_idx += 1
 
     # 버튼들 - 두 개씩 가로로 배치
-    tk.Button(left_frame, text="계산하기", command=calculate).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-    tk.Button(left_frame, text="균등 풍량 배분", command=equal_distribution).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    tk.Button(ctrl_parent, text="계산하기", command=calculate).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    tk.Button(ctrl_parent, text="균등 풍량 배분", command=equal_distribution).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
     row_idx += 1
-    tk.Button(left_frame, text="종합 사이징", command=total_sizing).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-    tk.Button(left_frame, text="팔레트 전체 지우기", command=clear_palette).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    tk.Button(ctrl_parent, text="종합 사이징", command=total_sizing).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    tk.Button(ctrl_parent, text="팔레트 전체 지우기", command=clear_palette).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
     row_idx += 1
 
-    tk.Button(left_frame, text="펜슬 모드", command=lambda: palette.set_mode_pencil()).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
-    tk.Button(left_frame, text="자동완성", command=auto_complete_action).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    tk.Button(ctrl_parent, text="펜슬 모드", command=lambda: palette.set_mode_pencil()).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    tk.Button(ctrl_parent, text="자동완성", command=auto_complete_action).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
     row_idx += 1
 
     # 결과 출력창
-    results_frame = tk.Frame(left_frame)
+    results_frame = tk.Frame(ctrl_parent)
     results_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
     left_frame.grid_rowconfigure(row_idx, weight=1)
     results_text_widget = tk.Text(results_frame, width=36, height=8, wrap="word", bg="white", relief="solid")
