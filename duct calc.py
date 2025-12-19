@@ -491,8 +491,32 @@ class Palette:
             seg.duct_w_mm = w
             seg.duct_h_mm = h
             seg.label_text = label
-            self.redraw_all()
-            self._notify_points_changed()
+            # update visuals but avoid triggering full sheet area update
+            try:
+                old_cb = getattr(self, 'sheet_changed_callback', None)
+                try:
+                    self.sheet_changed_callback = None
+                except Exception:
+                    old_cb = None
+                self.redraw_all()
+                # notify points changed (will not call sheet_changed_callback)
+                try:
+                    cb = getattr(self, "points_changed_callback", None)
+                    if callable(cb):
+                        try: cb(self)
+                        except: pass
+                except Exception:
+                    pass
+            finally:
+                try:
+                    self.sheet_changed_callback = old_cb
+                except Exception:
+                    pass
+            # compute thickness breakdown when a palette text/size changed
+            try:
+                compute_and_display_thickness_breakdown()
+            except Exception:
+                pass
 
     def on_right_click(self, event):
         sx, sy = event.x, event.y
@@ -542,9 +566,32 @@ class Palette:
             return
         self.push_undo()
         target.flow = new_flow
-        self.segments.clear()
-        self.redraw_all()
-        self._notify_points_changed()
+        # update visuals but avoid full sheet-area update; call thickness breakdown
+        try:
+            old_cb = getattr(self, 'sheet_changed_callback', None)
+            try:
+                self.sheet_changed_callback = None
+            except Exception:
+                old_cb = None
+            self.redraw_all()
+            # notify points changed without sheet callback
+            try:
+                cb = getattr(self, "points_changed_callback", None)
+                if callable(cb):
+                    try: cb(self)
+                    except: pass
+            except Exception:
+                pass
+        finally:
+            try:
+                self.sheet_changed_callback = old_cb
+            except Exception:
+                pass
+
+        try:
+            compute_and_display_thickness_breakdown()
+        except Exception:
+            pass
 
     def _find_point_near_model(self, mx, my, tol_model=0.3):
         for p in self.points:
@@ -1238,8 +1285,9 @@ class Palette:
 
 def update_sheet_area(pal: Palette):
     """Calculate total duct sheet area (m2) from palette segments and update results widget."""
-    global results_text_widget
-    if results_text_widget is None: return
+    # compute total sheet area but do not write it to the results text widget
+    # per user preference, the sheet area should not be displayed in the results
+    global last_sheet_area_m2
     total_area_m2 = 0.0
     for seg in getattr(pal, 'segments', []):
         L = seg.length_m()
@@ -1247,37 +1295,245 @@ def update_sheet_area(pal: Palette):
         h_m = getattr(seg, 'duct_h_mm', 0) / 1000.0
         area = (w_m + h_m) * 2 * L
         total_area_m2 += area
+    try:
+        last_sheet_area_m2 = total_area_m2
+    except Exception:
+        pass
+    return total_area_m2
 
-    # append a new numbered history line showing the latest sheet area
-    results_text_widget.config(state="normal")
-    existing = results_text_widget.get("1.0", "end").rstrip()
-    # count existing numbered lines like 'N. '
-    num = 0
-    if existing:
-        for ln in existing.splitlines():
-            s = ln.lstrip()
-            if not s: continue
-            # check prefix like '1.' or '12.'
-            parts = s.split(None, 1)
-            if parts:
-                prefix = parts[0]
-                if prefix.endswith('.'):
+
+def parse_thickness_rules(rules_text: str):
+    """Parse multiline rules into list of (min_mm, max_mm, thickness_mm).
+    Supported line formats:
+      - "min-max:thk"  e.g. "0-450:0.5"
+      - ">value:thk" or ">=value:thk"
+      - "<value:thk" or "<=value:thk"
+      - "value:thk" (exact) but treated as min==max
+    Returns sorted list by min ascending.
+    """
+    rules = []
+    if not rules_text:
+        return rules
+    for raw in rules_text.splitlines():
+        s = raw.strip()
+        if not s: continue
+        # split on ':' or '='
+        if ':' in s:
+            rng, thk = s.split(':', 1)
+        elif '=' in s:
+            rng, thk = s.split('=', 1)
+        else:
+            # if no separator, skip
+            continue
+        try:
+            thk_f = float(thk.strip())
+        except Exception:
+            continue
+
+        rng = rng.strip()
+        if rng.startswith('>'):
+            v = float(rng.lstrip('>=').strip())
+            rules.append((v + 0.0001, float('inf'), thk_f))
+        elif rng.startswith('<'):
+            v = float(rng.lstrip('<=') .strip())
+            rules.append((0.0, v - 0.0001, thk_f))
+        elif '-' in rng:
+            parts = rng.split('-', 1)
+            try:
+                vmin = float(parts[0].strip())
+            except:
+                vmin = 0.0
+            try:
+                vmax = float(parts[1].strip())
+            except:
+                vmax = float('inf')
+            rules.append((vmin, vmax, thk_f))
+        else:
+            try:
+                v = float(rng)
+                rules.append((v, v, thk_f))
+            except:
+                continue
+
+    # sort by min value
+    rules.sort(key=lambda t: (t[0] if t[0] is not None else 0.0))
+    return rules
+
+
+def get_thickness_for_longside(long_mm: float, rules_list):
+    for (mn, mx, thk) in rules_list:
+        if mn is None: mn = 0.0
+        if mx is None: mx = float('inf')
+        if mn - 1e-6 <= long_mm <= mx + 1e-6:
+            return thk
+    return None
+
+
+def compute_and_display_thickness_breakdown(numbered=True):
+    """Compute area grouped by thickness using current rule boxes and selected pressure."""
+    global pressure_combo, low_rule_pairs, high_rule_pairs, results_text_widget, palette
+    if results_text_widget is None:
+        messagebox.showwarning("경고", "결과창이 준비되지 않았습니다.")
+        return
+    try:
+        pressure = pressure_combo.get()
+    except Exception:
+        pressure = '저압'
+
+    # build rules: for 저압 use the low_rule_pairs widgets (support both old 2-tuple and new 3-tuple formats)
+    rules = []
+    if pressure == '저압':
+        for item in low_rule_pairs:
+            try:
+                if len(item) == 2:
+                    w_thk, w_rng = item
+                    thk_txt = w_thk.cget('text') if hasattr(w_thk, 'cget') else (w_thk.get() if hasattr(w_thk, 'get') else str(w_thk))
                     try:
-                        int(prefix[:-1])
-                        num += 1
+                        thk = float(thk_txt.replace('mm','').strip())
                     except Exception:
-                        pass
-    next_idx = num + 1
-    base = existing + "\n" if existing else ""
-    base += f"{next_idx}. 덕트 철판 소요량 (m²) : {total_area_m2:.1f}"
+                        continue
+                    rng = w_rng.get().strip() if hasattr(w_rng, 'get') else str(w_rng).strip()
+                    if not rng:
+                        continue
+                    # parse range formats like '0-450', '>2250', '<450'
+                    if rng.startswith('>'):
+                        try:
+                            v = float(rng.lstrip('>=').strip())
+                            rules.append((v + 0.0001, float('inf'), thk))
+                        except Exception:
+                            continue
+                    elif rng.startswith('<'):
+                        try:
+                            v = float(rng.lstrip('<=') .strip())
+                            rules.append((0.0, v - 0.0001, thk))
+                        except Exception:
+                            continue
+                    elif '-' in rng:
+                        parts = rng.split('-', 1)
+                        try:
+                            vmin = float(parts[0].strip())
+                        except:
+                            vmin = 0.0
+                        try:
+                            vmax = float(parts[1].strip())
+                        except:
+                            vmax = float('inf')
+                        rules.append((vmin, vmax, thk))
+                    else:
+                        try:
+                            v = float(rng)
+                            rules.append((v, v, thk))
+                        except:
+                            continue
+                elif len(item) == 3:
+                    l_thk, l_min, e_max = item
+                    thk_txt = l_thk.cget('text') if hasattr(l_thk, 'cget') else (l_thk.get() if hasattr(l_thk, 'get') else str(l_thk))
+                    try:
+                        thk = float(thk_txt.replace('mm','').strip())
+                    except Exception:
+                        continue
+                    # parse min label like '0~' or '451~'
+                    try:
+                        min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else str(l_min)
+                        min_val = float(min_txt.replace('~','').strip())
+                    except Exception:
+                        min_val = 0.0
+                    max_txt = e_max.get().strip() if hasattr(e_max, 'get') else str(e_max).strip()
+                    if max_txt == '':
+                        max_val = float('inf')
+                    else:
+                        try:
+                            max_val = float(max_txt)
+                        except Exception:
+                            if max_txt.startswith('>'):
+                                try:
+                                    v = float(max_txt.lstrip('>').strip())
+                                    min_val = v + 0.0001
+                                    max_val = float('inf')
+                                except:
+                                    max_val = float('inf')
+                            else:
+                                max_val = float('inf')
+                    rules.append((min_val, max_val, thk))
+            except Exception:
+                continue
+    else:
+        # build rules from high_rule_pairs (same structure as low_rule_pairs)
+        for item in high_rule_pairs:
+            try:
+                l_thk, l_min, e_max = item
+                thk_txt = l_thk.cget('text') if hasattr(l_thk, 'cget') else (l_thk.get() if hasattr(l_thk, 'get') else str(l_thk))
+                try:
+                    thk = float(thk_txt.replace('mm','').strip())
+                except Exception:
+                    continue
+                try:
+                    min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else str(l_min)
+                    min_val = float(min_txt.replace('~','').strip())
+                except Exception:
+                    min_val = 0.0
+                max_txt = e_max.get().strip() if hasattr(e_max, 'get') else str(e_max).strip()
+                if max_txt == '':
+                    max_val = float('inf')
+                else:
+                    try:
+                        max_val = float(max_txt)
+                    except Exception:
+                        if max_txt.startswith('>'):
+                            try:
+                                v = float(max_txt.lstrip('>').strip())
+                                min_val = v + 0.0001
+                                max_val = float('inf')
+                            except:
+                                max_val = float('inf')
+                        else:
+                            max_val = float('inf')
+                rules.append((min_val, max_val, thk))
+            except Exception:
+                continue
+
+    area_by_thk = defaultdict(float)
+    count_by_thk = defaultdict(int)
+
+    for seg in getattr(palette, 'segments', []):
+        L = seg.length_m()
+        w_m = getattr(seg, 'duct_w_mm', 0) / 1000.0
+        h_m = getattr(seg, 'duct_h_mm', 0) / 1000.0
+        area = (w_m + h_m) * 2 * L
+        long_side_mm = max(getattr(seg, 'duct_w_mm', 0), getattr(seg, 'duct_h_mm', 0))
+        thk = get_thickness_for_longside(long_side_mm, rules)
+        if thk is None:
+            # fallback to a default thickness
+            thk = 0.8
+        area_by_thk[thk] += area
+        count_by_thk[thk] += 1
+
+    # prepare display text
+    base = results_text_widget.get("1.0", "end").rstrip()
+    if base: base += "\n"
+    base += "[두께별 덕트 판재 소요량]\n"
+    total = 0.0
+    # list by ascending thickness; optionally number the lines
+    if numbered:
+        for idx, thk in enumerate(sorted(area_by_thk.keys()), start=1):
+            a = area_by_thk[thk]
+            total += a
+            base += f"{idx}. {thk:.2f} mm : {a:.2f} m² (구간 수: {count_by_thk[thk]})\n"
+    else:
+        for thk in sorted(area_by_thk.keys()):
+            a = area_by_thk[thk]
+            total += a
+            base += f"- {thk:.2f} mm : {a:.2f} m² (구간 수: {count_by_thk[thk]})\n"
+    base += f"총 합계: {total:.2f} m²"
+
+    results_text_widget.config(state="normal")
     results_text_widget.delete("1.0", "end")
     results_text_widget.insert("end", base)
     results_text_widget.config(state="disabled")
     try:
         results_text_widget.see("end")
     except Exception:
-        try: results_text_widget.yview_moveto(1.0)
-        except: pass
+        pass
 
 def get_sizing_params():
     try: dp = float(resistance_entry.get())
@@ -1337,22 +1593,28 @@ def calculate():
         D1 = calc_circular_diameter(q, dp)
         D2 = round_step_up(D1, 50)
 
+        # compute both performed sizing (w,h) and theoretical rectangle (theo_big,theo_small)
         w, h, label = perform_sizing(q, dp, use_fixed, fixed_val, r)
+        try:
+            _, _, _, theo_big, theo_small = size_rect_from_D1(D1, r, 50)
+        except Exception:
+            theo_big, theo_small = w, h
 
+        # Always show: 원형덕트 (이론치), 원형덕트(규격화), 사각덕트 (이론치), 사각덕트(규격화)
         if use_fixed:
             text = (
                 f"- 원형덕트 (이론치) : {D1:.0f}\n"
                 f"- 원형덕트(규격화) : {D2}\n"
-                f"- 사각덕트(이론치) : {w} X {h}\n"
+                f"- 사각덕트 (이론치) : {theo_big:.1f} X {theo_small:.1f}\n"
+                f"- 사각덕트(규격화) : {w} X {h}\n"
                 f"※ 고정 변 모드 적용 중"
             )
         else:
-            _, _, _, theo_big, theo_small = size_rect_from_D1(D1, r, 50)
             text = (
                 f"- 원형덕트 (이론치) : {D1:.0f}\n"
                 f"- 원형덕트(규격화) : {D2}\n"
-                f"- 사각덕트(이론치) : {w} X {h}\n"
-                f"- 사각덕트 (규격화) : {theo_big:.1f} X {theo_small:.1f}\n"
+                f"- 사각덕트 (이론치) : {theo_big:.1f} X {theo_small:.1f}\n"
+                f"- 사각덕트(규격화) : {w} X {h}\n"
             )
 
         text = "[덕트 사이즈 결과]\n" + text + f"\n※ 팔레트 격자 1칸 = 0.5 m"
@@ -1361,15 +1623,45 @@ def calculate():
         results_text_widget.insert("end", text)
         results_text_widget.config(state="disabled")
 
-        # update inlet flow in palette
+        # update inlet flow in palette BUT prevent sheet_changed_callback from
+        # adding the sheet-area line to the results when called from Calculate()
         try:
-            palette.set_inlet_flow(q)
+            old_cb = getattr(palette, 'sheet_changed_callback', None)
+            try:
+                palette.sheet_changed_callback = None
+            except Exception:
+                old_cb = None
+            try:
+                palette.set_inlet_flow(q)
+            finally:
+                try:
+                    palette.sheet_changed_callback = old_cb
+                except Exception:
+                    pass
         except Exception:
             pass
 
     except ValueError as e:
+        import traceback, datetime
+        tb = traceback.format_exc()
+        try:
+            with open('duct_calc_error.log', 'a', encoding='utf-8') as f:
+                f.write(f"\n[{datetime.datetime.now().isoformat()}] ValueError in calculate():\n")
+                f.write(tb)
+        except Exception:
+            pass
+        traceback.print_exc()
         messagebox.showerror("입력 오류", f"입력값을 확인하세요!\n\n{e}")
     except Exception as e:
+        import traceback, datetime
+        tb = traceback.format_exc()
+        try:
+            with open('duct_calc_error.log', 'a', encoding='utf-8') as f:
+                f.write(f"\n[{datetime.datetime.now().isoformat()}] Exception in calculate():\n")
+                f.write(tb)
+        except Exception:
+            pass
+        traceback.print_exc()
         messagebox.showerror("알 수 없는 오류", f"알 수 없는 오류:\n{e}")
 
 
@@ -1380,21 +1672,24 @@ def total_sizing():
         return
     palette.draw_duct_network(dp, use_fixed, fixed_val, r)
 
-    total_area_m2 = 0.0
-    for seg in palette.segments:
-        L = seg.length_m()
-        w_m = seg.duct_w_mm / 1000.0
-        h_m = seg.duct_h_mm / 1000.0
-        area = (w_m + h_m) * 2 * L
-        total_area_m2 += area
+    # 계산된 전체 철판 소요량은 내부에만 저장하고 결과 텍스트에는 표시하지 않습니다.
+    try:
+        total_area_m2 = update_sheet_area(palette)
+    except Exception:
+        # fallback: 수동 계산
+        total_area_m2 = 0.0
+        for seg in getattr(palette, 'segments', []):
+            L = seg.length_m()
+            w_m = getattr(seg, 'duct_w_mm', 0) / 1000.0
+            h_m = getattr(seg, 'duct_h_mm', 0) / 1000.0
+            area = (w_m + h_m) * 2 * L
+            total_area_m2 += area
 
-    results_text_widget.config(state="normal")
-    base = results_text_widget.get("1.0", "end").rstrip()
-    if base: base += "\n"
-    base += f"5. 덕트 철판 소요량 (m²) : {total_area_m2:.1f}"
-    results_text_widget.delete("1.0", "end")
-    results_text_widget.insert("end", base)
-    results_text_widget.config(state="disabled")
+    # 두께별 소요량은 표시하지만, 전체 합계 라인은 결과창에 출력하지 않습니다.
+    try:
+        compute_and_display_thickness_breakdown(numbered=False)
+    except Exception:
+        pass
 
 
 def auto_complete_action():
@@ -1403,6 +1698,16 @@ def auto_complete_action():
         messagebox.showwarning("경고", "고정 변 길이(mm)를 올바르게 입력하세요.")
         return
     palette.auto_complete(dp, use_fixed, fixed_val, r)
+    # after auto-complete, update and display sheet area and thickness breakdown
+    try:
+        update_sheet_area(palette)
+    except Exception:
+        pass
+    try:
+        # For auto-complete, do not number lines; use '-' prefix instead
+        compute_and_display_thickness_breakdown(numbered=False)
+    except Exception:
+        pass
 
 
 def clear_palette(): palette.clear_all()
@@ -1440,6 +1745,7 @@ def create_app():
     # expose commonly used widgets as module-level globals so callbacks can access them
     global cubic_meter_hour_entry, resistance_entry, aspect_ratio_combo, fixed_side_var, fixed_side_entry
     global results_text_widget, relpos_text_widget, palette
+    global pressure_combo, low_rule_pairs, high_rule_pairs
 
     # 좌측 정보 입력창 (라벨프레임으로 묶음)
     info_frame = tk.LabelFrame(main_frame, text="환경 입력", width=180)
@@ -1453,12 +1759,14 @@ def create_app():
         e.insert(0, dft)
 
     # 덕트 사이징 관련 컨트롤을 라벨프레임으로 묶음
-    left_frame = tk.LabelFrame(main_frame, text="덕트 사이징")
+    # reduce the left control panel width so the label area is narrower
+    left_frame = tk.LabelFrame(main_frame, text="덕트 사이징", width=120)
     # 왼쪽 컨트롤을 윈도우 세로 상단에 정렬
     left_frame.pack(side="left", anchor="n", fill="y")
 
     right_frame = tk.Frame(main_frame, bg="#f5f5f5", bd=1, relief="solid")
-    right_frame.configure(width=700)
+    # increase palette area width for more horizontal space
+    right_frame.configure(width=940)
     right_frame.pack(side="right", fill="both", expand=True)
 
     # 제어 패널 (탭으로 묶기)
@@ -1470,9 +1778,186 @@ def create_app():
     # 추가 탭: 장방형 덕트 두께 설정
     tab_thickness = tk.Frame(notebook)
     notebook.add(tab_thickness, text="장방형 덕트 두께")
-    tk.Label(tab_thickness, text="장방형 덕트 두께(mm):").pack(anchor="w", padx=6, pady=(6,2))
-    rect_duct_thickness_entry = tk.Entry(tab_thickness, width=10)
-    rect_duct_thickness_entry.pack(anchor="w", padx=6, pady=(0,6))
+    tk.Label(tab_thickness, text="덕트 종류 선택:").grid(row=0, column=0, sticky="w", padx=6, pady=(6,2))
+    pressure_combo = ttk.Combobox(tab_thickness, values=["저압","고압"], state="readonly", width=8)
+    pressure_combo.current(0)
+    pressure_combo.grid(row=0, column=1, sticky="w", padx=6, pady=(6,2))
+
+    # Default 체크박스: 체크하면 규칙을 초기값으로 복원
+    default_rules_var = tk.BooleanVar(value=False)
+    def on_default_toggle():
+        if not default_rules_var.get():
+            return
+        try:
+            # restore low defaults if widgets exist
+            for idx, pair in enumerate(low_rule_pairs):
+                try:
+                    _, l_min, e_max = pair
+                    d = low_defaults[idx][1]
+                    if d is None:
+                        e_max.delete(0, 'end')
+                    else:
+                        e_max.delete(0, 'end')
+                        e_max.insert(0, str(d))
+                    # update min label text
+                    if idx == 0:
+                        l_min.config(text='0~')
+                    else:
+                        prev = low_defaults[idx-1][1]
+                        if prev is None:
+                            l_min.config(text='~')
+                        else:
+                            l_min.config(text=f"{int(prev)+1}~")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            for idx, pair in enumerate(high_rule_pairs):
+                try:
+                    _, l_min, e_max = pair
+                    d = high_defaults[idx][1]
+                    if d is None:
+                        e_max.delete(0, 'end')
+                    else:
+                        e_max.delete(0, 'end')
+                        e_max.insert(0, str(d))
+                    if idx == 0:
+                        l_min.config(text='0~')
+                    else:
+                        prev = high_defaults[idx-1][1]
+                        if prev is None:
+                            l_min.config(text='~')
+                        else:
+                            l_min.config(text=f"{int(prev)+1}~")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    chk_default = tk.Checkbutton(tab_thickness, text="Default값", variable=default_rules_var, command=on_default_toggle)
+    chk_default.grid(row=0, column=2, sticky="w", padx=6, pady=(6,2))
+
+    tk.Label(tab_thickness, text="저압 규칙 (두께 고정, 장변 범위만 수정):").grid(row=1, column=0, columnspan=2, sticky="w", padx=6)
+    # Place rows directly in the tab grid so left edge matches the pressure combo (column=1)
+    # 기본 매핑: 각 행은 [두께(고정 라벨)] [장변 최소 라벨(고정)] [장변 최대 입력(편집 가능)]
+    low_defaults = [
+        (0.5, 450),
+        (0.6, 750),
+        (0.8, 1500),
+        (1.0, 2250),
+        (1.2, None),
+    ]
+    low_rule_pairs = []
+    prev_max = -1
+    base_row = 2
+    # ensure the tab's columns provide enough space for 'mm' and entries
+    try:
+        tab_thickness.grid_columnconfigure(0, minsize=80)
+        tab_thickness.grid_columnconfigure(1, minsize=80)
+        tab_thickness.grid_columnconfigure(2, minsize=120)
+    except Exception:
+        pass
+    for i, (thk, max_default) in enumerate(low_defaults):
+        r = base_row + i
+        # thickness label (placed in leftmost column under the header)
+        l_thk = tk.Label(tab_thickness, text=f"{thk:.2f} mm", anchor="w", fg="black", font=("Arial", 9))
+        l_thk.grid(row=r, column=0, padx=(0,0), pady=2, sticky="w")
+
+        # min label
+        if i == 0:
+            min_label_text = "0~"
+        else:
+            min_label_text = f"{int(prev_max)+1}~"
+        l_min = tk.Label(tab_thickness, text=min_label_text, width=8, anchor="w", font=("Arial", 9))
+        l_min.grid(row=r, column=1, padx=(4,6), pady=2, sticky="w")
+
+        # max entry
+        e_max = tk.Entry(tab_thickness, width=8)
+        e_max.grid(row=r, column=2, padx=(0,2), pady=2, sticky="w")
+        if max_default is not None:
+            e_max.insert(0, str(max_default))
+            prev_max = max_default
+        else:
+            e_max.insert(0, "")
+            prev_max = None
+
+        def make_on_enter(idx, entry_widget):
+            def on_enter(event=None):
+                val = entry_widget.get().strip()
+                try:
+                    v = int(float(val))
+                except Exception:
+                    return
+                next_idx = idx + 1
+                if next_idx < len(low_rule_pairs):
+                    try:
+                        next_min_label = low_rule_pairs[next_idx][1]
+                        next_min_label.config(text=f"{v+1}~")
+                    except Exception:
+                        pass
+            return on_enter
+
+        e_max.bind('<Return>', make_on_enter(i, e_max))
+        low_rule_pairs.append((l_thk, l_min, e_max))
+
+    # place 고압 header below the 저압 rows
+    high_header_row = base_row + len(low_defaults)
+    tk.Label(tab_thickness, text="고압 규칙 (두께 고정, 장변 범위만 수정):").grid(row=high_header_row, column=0, columnspan=2, sticky="w", padx=6)
+    # 기본값 세팅 (고압)
+    high_defaults = [
+        (0.8, 450),
+        (1.0, 1200),
+        (1.2, None),
+    ]
+    high_rule_pairs = []
+    prev_max_h = -1
+    high_base_row = high_header_row + 1
+    for i, (thk, max_default) in enumerate(high_defaults):
+        r = high_base_row + i
+        l_thk = tk.Label(tab_thickness, text=f"{thk:.2f} mm", anchor="w", fg="black", font=("Arial", 9))
+        l_thk.grid(row=r, column=0, padx=(0,0), pady=2, sticky="w")
+        if i == 0:
+            min_label_text = "0~"
+        else:
+            min_label_text = f"{int(prev_max_h)+1}~" if prev_max_h is not None else "~"
+        l_min = tk.Label(tab_thickness, text=min_label_text, width=8, anchor="w", font=("Arial", 9))
+        l_min.grid(row=r, column=1, padx=(4,6), pady=2, sticky="w")
+        e_max = tk.Entry(tab_thickness, width=8)
+        e_max.grid(row=r, column=2, padx=(0,2), pady=2, sticky="w")
+        if max_default is not None:
+            e_max.insert(0, str(max_default))
+            prev_max_h = max_default
+        else:
+            e_max.insert(0, "")
+            prev_max_h = None
+
+        def make_on_enter_h(idx, entry_widget):
+            def on_enter(event=None):
+                val = entry_widget.get().strip()
+                try:
+                    v = int(float(val))
+                except Exception:
+                    return
+                next_idx = idx + 1
+                if next_idx < len(high_rule_pairs):
+                    try:
+                        next_min_label = high_rule_pairs[next_idx][1]
+                        next_min_label.config(text=f"{v+1}~")
+                    except Exception:
+                        pass
+            return on_enter
+
+        e_max.bind('<Return>', make_on_enter_h(i, e_max))
+        high_rule_pairs.append((l_thk, l_min, e_max))
+
+    # place the action button after the high rules
+    button_row = high_base_row + len(high_defaults)
+
+    def show_thickness_breakdown():
+        compute_and_display_thickness_breakdown()
+
+    tk.Button(tab_thickness, text="두께별 소요량 계산", command=show_thickness_breakdown).grid(row=button_row, column=0, columnspan=3, pady=6, sticky="w")
 
     ctrl_parent = tab1
     row_idx = 0
@@ -1526,7 +2011,7 @@ def create_app():
     results_frame = tk.Frame(ctrl_parent)
     results_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
     left_frame.grid_rowconfigure(row_idx, weight=1)
-    results_text_widget = tk.Text(results_frame, width=36, height=8, wrap="word", bg="white", relief="solid")
+    results_text_widget = tk.Text(results_frame, width=36, height=16, wrap="word", bg="white", relief="solid")
     results_text_widget.pack(side="left", fill="both", expand=True)
     results_scrollbar = tk.Scrollbar(results_frame, orient="vertical", command=results_text_widget.yview)
     results_scrollbar.pack(side="right", fill="y")
@@ -1539,7 +2024,11 @@ def create_app():
     palette = Palette(right_frame)
     # Outlet relative-position statistics removed; no callback for it
     palette.sheet_changed_callback = update_sheet_area
-    update_sheet_area(palette)
+    # Do not call update_sheet_area here on startup to avoid showing initial total
+    # update_sheet_area(palette)
+
+    # DEBUG: 호출 시점에 한번 `calculate()` 자동 실행하여 예외가 있는지 터미널에 출력
+    # NOTE: Removed temporary auto-call to `calculate()` used for debugging.
 
     # 시작 시: 전체 창 크기를 현재 값에서 가로 +20%, 세로 +20% 만큼 늘리고, 그 증가분을 팔레트(right_frame)에 할당
     try:
