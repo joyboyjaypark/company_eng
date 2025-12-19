@@ -363,35 +363,9 @@ class Palette:
                 tx, ty = hx, hy - leader_length_px - text_offset_px
                 seg.text_id = self.canvas.create_text(tx, ty, text=seg.label_text, fill="blue", font=("Arial", 8), anchor="s", tags=text_tags)
 
-        # 툴팁 그리기
-        if self.current_mouse_model is not None:
-            self._draw_tooltip()
+    # 툴팁 기능 제거: 마우스 위치에 자동 계산되는 텍스트 박스는 더 이상 표시하지 않음
 
-    def _draw_tooltip(self):
-        cur_mx, cur_my = self.current_mouse_model
-        outlets = [p for p in self.points if p.kind == "outlet"]
-        if outlets:
-            sum_dx = sum(cur_mx - p.mx for p in outlets)
-            sum_dy = sum(cur_my - p.my for p in outlets)
-            sum_abs_dx = sum(abs(cur_mx - p.mx) for p in outlets)
-            sum_abs_dy = sum(abs(cur_my - p.my) for p in outlets)
-            sum_sq_dx = sum((cur_mx - p.mx)**2 for p in outlets)
-            sum_sq_dy = sum((cur_my - p.my)**2 for p in outlets)
-
-            tooltip_text = (
-                f"Σ(Cursor.x - Outlet.x) : {sum_dx:.2f} m\n"
-                f"Σ(Cursor.y - Outlet.y) : {sum_dy:.2f} m\n"
-                f"Σ(|Cursor.x - Outlet.x|) : {sum_abs_dx:.2f} m\n"
-                f"Σ(|Cursor.y - Outlet.y|) : {sum_abs_dy:.2f} m\n"
-                f"Σ(Cursor.x - Outlet.x)²: {sum_sq_dx:.2f} m²\n"
-                f"Σ(Cursor.y - Outlet.y)²: {sum_sq_dy:.2f} m²"
-            )
-            msx, msy = self.model_to_screen(cur_mx, cur_my)
-            tx, ty = msx + 20, msy + 20
-            box_w = 260
-            box_h = 100
-            self.canvas.create_rectangle(tx - 5, ty - 5, tx + box_w, ty + box_h, fill="#ffffe0", outline="black")
-            self.canvas.create_text(tx, ty, text=tooltip_text, anchor="nw", font=("Consolas", 9), fill="black")
+    # _draw_tooltip removed: mouse-over auto-calculation box deleted per user request
 
     def on_resize(self, event):
         self.redraw_all()
@@ -1257,31 +1231,9 @@ class Palette:
 # 3. GUI 이벤트 처리
 # =========================
 
-relpos_text_widget = None
-
-def update_outlet_calculations(pal: Palette):
-    global relpos_text_widget
-    if relpos_text_widget is None: return
-    if not pal.points or pal.points[0].kind != "inlet":
-        text = "inlet이 없습니다."
-    else:
-        inlet = pal.points[0]
-        outlets = [p for p in pal.points[1:] if p.kind == "outlet"]
-        sum_dx = sum(inlet.mx - p.mx for p in outlets)
-        sum_dy = sum(inlet.my - p.my for p in outlets)
-        sum_sq_dx = sum((inlet.mx - p.mx)**2 for p in outlets)
-        sum_sq_dy = sum((inlet.my - p.my)**2 for p in outlets)
-        text = (
-            f"Outlet 개수: {len(outlets)}\n"
-            f"1. Σ(inlet.x - outlet.x) : {sum_dx:.2f} m\n"
-            f"2. Σ(inlet.y - outlet.y) : {sum_dy:.2f} m\n"
-            f"3. Σ(inlet.x - outlet.x)²: {sum_sq_dx:.2f} m²\n"
-            f"4. Σ(inlet.y - outlet.y)²: {sum_sq_dy:.2f} m²"
-        )
-    relpos_text_widget.config(state="normal")
-    relpos_text_widget.delete("1.0", "end")
-    relpos_text_widget.insert("end", text)
-    relpos_text_widget.config(state="disabled")
+# Outlet relative-position statistics and cursor tooltip removed per user request.
+# The functions and widgets that displayed outlet relative statistics and the
+# mouse-over tooltip were intentionally deleted to simplify the UI.
 
 
 def update_sheet_area(pal: Palette):
@@ -1296,12 +1248,28 @@ def update_sheet_area(pal: Palette):
         area = (w_m + h_m) * 2 * L
         total_area_m2 += area
 
-    # append a new history line showing the latest sheet area
+    # append a new numbered history line showing the latest sheet area
     results_text_widget.config(state="normal")
-    base = results_text_widget.get("1.0", "end").rstrip()
-    if base:
-        base = base + "\n"
-    base += f"5. 덕트 철판 소요량 (m²) : {total_area_m2:.1f}"
+    existing = results_text_widget.get("1.0", "end").rstrip()
+    # count existing numbered lines like 'N. '
+    num = 0
+    if existing:
+        for ln in existing.splitlines():
+            s = ln.lstrip()
+            if not s: continue
+            # check prefix like '1.' or '12.'
+            parts = s.split(None, 1)
+            if parts:
+                prefix = parts[0]
+                if prefix.endswith('.'):
+                    try:
+                        int(prefix[:-1])
+                        num += 1
+                    except Exception:
+                        pass
+    next_idx = num + 1
+    base = existing + "\n" if existing else ""
+    base += f"{next_idx}. 덕트 철판 소요량 (m²) : {total_area_m2:.1f}"
     results_text_widget.delete("1.0", "end")
     results_text_widget.insert("end", base)
     results_text_widget.config(state="disabled")
@@ -1368,32 +1336,36 @@ def calculate():
 
         D1 = calc_circular_diameter(q, dp)
         D2 = round_step_up(D1, 50)
-        
+
         w, h, label = perform_sizing(q, dp, use_fixed, fixed_val, r)
-        
+
         if use_fixed:
-             text = (
-                f"1. 등가원형 직경 (mm) : {D1:.0f}\n"
-                f"2. 원형직경 (mm)     : {D2}\n"
-                f"3. 사각덕트 사이즈 (고정변 {fixed_val}mm) : {w} X {h}\n"
+            text = (
+                f"- 원형덕트 (이론치) : {D1:.0f}\n"
+                f"- 원형덕트(규격화) : {D2}\n"
+                f"- 사각덕트(이론치) : {w} X {h}\n"
                 f"※ 고정 변 모드 적용 중"
             )
         else:
             _, _, _, theo_big, theo_small = size_rect_from_D1(D1, r, 50)
             text = (
-                f"1. 등가원형 직경 (mm) : {D1:.0f}\n"
-                f"2. 원형직경 (mm)     : {D2}\n"
-                f"3. 사각덕트 사이즈 (50mm 조정) : {w} X {h}\n"
-                f"4. 사각덕트 사이즈 (조정 전)    : {theo_big:.1f} X {theo_small:.1f}\n"
+                f"- 원형덕트 (이론치) : {D1:.0f}\n"
+                f"- 원형덕트(규격화) : {D2}\n"
+                f"- 사각덕트(이론치) : {w} X {h}\n"
+                f"- 사각덕트 (규격화) : {theo_big:.1f} X {theo_small:.1f}\n"
             )
-        text += f"\n※ 팔레트 격자 1칸 = 0.5 m"
+
+        text = "[덕트 사이즈 결과]\n" + text + f"\n※ 팔레트 격자 1칸 = 0.5 m"
         results_text_widget.config(state="normal")
         results_text_widget.delete("1.0", "end")
         results_text_widget.insert("end", text)
         results_text_widget.config(state="disabled")
 
-        palette.set_inlet_flow(q)
-        update_outlet_calculations(palette)
+        # update inlet flow in palette
+        try:
+            palette.set_inlet_flow(q)
+        except Exception:
+            pass
 
     except ValueError as e:
         messagebox.showerror("입력 오류", f"입력값을 확인하세요!\n\n{e}")
@@ -1547,20 +1519,11 @@ def create_app():
     results_text_widget.config(state="disabled")
     row_idx += 1
 
-    # 통계 출력창
-    relpos_frame = tk.Frame(left_frame)
-    relpos_frame.grid(row=row_idx, column=0, columnspan=2, padx=5, pady=(0, 5), sticky="nsew")
-    tk.Label(relpos_frame, text="Outlet 상대 위치 통계 (inlet - outlet):").pack(anchor="w")
-    relpos_text_widget = tk.Text(relpos_frame, width=36, height=6, wrap="word", bg="white", relief="solid")
-    relpos_text_widget.pack(fill="both", expand=True)
-    relpos_text_widget.config(state="disabled")
-
     # 팔레트 초기화
     global palette
     palette = Palette(right_frame)
-    palette.points_changed_callback = update_outlet_calculations
+    # Outlet relative-position statistics removed; no callback for it
     palette.sheet_changed_callback = update_sheet_area
-    update_outlet_calculations(palette)
     update_sheet_area(palette)
 
     # 시작 시: 전체 창 너비를 현재 값의 +30%로 늘리고, 그 증가분을 전부 팔레트(right_frame)에 할당
