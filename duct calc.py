@@ -161,8 +161,27 @@ class DuctSegment:
 
 class Palette:
     def __init__(self, parent):
-        self.canvas = tk.Canvas(parent, bg="white")
-        self.canvas.pack(expand=True, fill="both", padx=10, pady=10)
+        # Create a container so we can place top and left rulers around the main canvas
+        self.container = tk.Frame(parent)
+        self.container.pack(expand=True, fill="both", padx=10, pady=10)
+
+        # Top ruler (horizontal) and left ruler (vertical)
+        self.ruler_top = tk.Canvas(self.container, height=24, bg="#f0f0f0", highlightthickness=0)
+        self.ruler_left = tk.Canvas(self.container, width=40, bg="#f0f0f0", highlightthickness=0)
+
+        # Main drawing canvas
+        self.canvas = tk.Canvas(self.container, bg="white")
+
+        # Layout using grid: (0,0)=corner spacer, (0,1)=top ruler, (1,0)=left ruler, (1,1)=canvas
+        spacer = tk.Frame(self.container, width=40, height=24, bg="#f0f0f0")
+        spacer.grid(row=0, column=0, sticky="nsew")
+        self.ruler_top.grid(row=0, column=1, sticky="nsew")
+        self.ruler_left.grid(row=1, column=0, sticky="nsew")
+        self.canvas.grid(row=1, column=1, sticky="nsew")
+
+        # Make grid cells expandable
+        self.container.grid_rowconfigure(1, weight=1)
+        self.container.grid_columnconfigure(1, weight=1)
 
         self.points = []
         self.inlet_flow = 0.0
@@ -202,12 +221,75 @@ class Palette:
         self.canvas.bind("<B2-Motion>", self.on_middle_drag)
         self.canvas.bind("<Configure>", self.on_resize)
 
+        # Also update rulers when canvas resizes
+        self.ruler_top.bind("<Configure>", self.on_resize)
+        self.ruler_left.bind("<Configure>", self.on_resize)
+
         self.canvas.bind("<Motion>", self.on_mouse_move)
         self.canvas.bind("<Leave>", self.on_mouse_leave)
         self.canvas.bind("<B1-Motion>", self.on_left_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_left_release)
 
         self.redraw_all()
+
+    def draw_rulers(self):
+        try:
+            cw = self.canvas.winfo_width()
+            ch = self.canvas.winfo_height()
+            if cw <= 0 or ch <= 0:
+                return
+
+            # Clear rulers
+            self.ruler_top.delete("all")
+            self.ruler_left.delete("all")
+
+            # Determine visible model range
+            mx_min, _ = self.screen_to_model(0, 0)
+            mx_max, _ = self.screen_to_model(cw, 0)
+            _, my_min = self.screen_to_model(0, 0)
+            _, my_max = self.screen_to_model(0, ch)
+
+            # Choose tick spacing (model units in meters)
+            # Use minor ticks at 0.5m if visible, otherwise 1m
+            if self.scale_factor * 0.5 >= 8:
+                minor = 0.5
+            else:
+                minor = 1.0
+            major = 1.0 if minor == 0.5 else 5.0
+
+            # Horizontal ruler (top)
+            start = math.floor(mx_min / minor) * minor
+            x = start
+            while x <= mx_max:
+                px = x * self.scale_factor + self.offset_x
+                # draw tick
+                if abs((x / major) - round(x / major)) < 1e-6:
+                    # major tick (shorter: half length)
+                    self.ruler_top.create_line(px, 24, px, 15, fill="black")
+                    label = f"{x:.0f}" if major >= 1 else f"{x:.1f}"
+                    self.ruler_top.create_text(px + 2, 2, text=label, anchor="nw", font=("Arial", 8))
+                else:
+                    # minor tick (shorter)
+                    self.ruler_top.create_line(px, 24, px, 18, fill="black")
+                x += minor
+
+            # Vertical ruler (left) - note y increases downward on screen
+            start_y = math.floor(my_min / minor) * minor
+            y = start_y
+            while y <= my_max:
+                py = y * self.scale_factor + self.offset_y
+                # draw tick
+                if abs((y / major) - round(y / major)) < 1e-6:
+                    # major tick (shorter: half length)
+                    self.ruler_left.create_line(40, py, 26, py, fill="black")
+                    label = f"{y:.0f}" if major >= 1 else f"{y:.1f}"
+                    self.ruler_left.create_text(2, py - 6, text=label, anchor="nw", font=("Arial", 8))
+                else:
+                    # minor tick (shorter)
+                    self.ruler_left.create_line(40, py, 30, py, fill="black")
+                y += minor
+        except Exception:
+            pass
 
     def _notify_points_changed(self):
         cb = getattr(self, "points_changed_callback", None)
@@ -316,6 +398,11 @@ class Palette:
     def redraw_all(self):
         self.canvas.delete("all")
         self.draw_grid()
+        # draw rulers after grid so they reflect current view
+        try:
+            self.draw_rulers()
+        except Exception:
+            pass
 
         # 점 그리기
         for p in self.points:
