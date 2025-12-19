@@ -1455,7 +1455,8 @@ def create_app():
         e.insert(0, dft)
 
     left_frame = tk.Frame(main_frame)
-    left_frame.pack(side="left", anchor="w")
+    # 왼쪽 컨트롤을 윈도우 세로 상단에 정렬
+    left_frame.pack(side="left", anchor="n", fill="y")
 
     right_frame = tk.Frame(main_frame, bg="#f5f5f5", bd=1, relief="solid")
     right_frame.configure(width=700)
@@ -1497,11 +1498,13 @@ def create_app():
     fixed_side_entry.insert(0, "300")
     row_idx += 1
 
-    # 버튼들
-    tk.Button(left_frame, text="계산하기", command=calculate).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
-    tk.Button(left_frame, text="균등 풍량 배분", command=equal_distribution).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
-    tk.Button(left_frame, text="종합 사이징", command=total_sizing).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
-    tk.Button(left_frame, text="팔레트 전체 지우기", command=clear_palette).grid(row=row_idx, column=0, columnspan=2, pady=5, sticky="w"); row_idx += 1
+    # 버튼들 - 두 개씩 가로로 배치
+    tk.Button(left_frame, text="계산하기", command=calculate).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    tk.Button(left_frame, text="균등 풍량 배분", command=equal_distribution).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    row_idx += 1
+    tk.Button(left_frame, text="종합 사이징", command=total_sizing).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
+    tk.Button(left_frame, text="팔레트 전체 지우기", command=clear_palette).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
+    row_idx += 1
 
     tk.Button(left_frame, text="펜슬 모드", command=lambda: palette.set_mode_pencil()).grid(row=row_idx, column=0, padx=5, pady=5, sticky="w")
     tk.Button(left_frame, text="자동완성", command=auto_complete_action).grid(row=row_idx, column=1, padx=5, pady=5, sticky="w")
@@ -1526,29 +1529,45 @@ def create_app():
     palette.sheet_changed_callback = update_sheet_area
     update_sheet_area(palette)
 
-    # 시작 시: 전체 창 너비를 현재 값의 +30%로 늘리고, 그 증가분을 전부 팔레트(right_frame)에 할당
+    # 시작 시: 전체 창 크기를 현재 값에서 가로 +20%, 세로 +20% 만큼 늘리고, 그 증가분을 팔레트(right_frame)에 할당
     try:
         root.update_idletasks()
         base_w = root.winfo_width() or root.winfo_reqwidth() or 1000
         base_h = root.winfo_height() or root.winfo_reqheight() or 700
-        delta = int(base_w * 0.3)
 
-        # 현재 right_frame 너비를 측정해 증가분을 적용
+        # 팔레트(right_frame)만 가로/세로 각각 20% 증가시키기
         try:
-            curr_rf = right_frame.winfo_width()
-            if not curr_rf or curr_rf <= 1:
-                curr_rf = 700
+            curr_rf_w = right_frame.winfo_width()
+            curr_rf_h = right_frame.winfo_height()
+            if not curr_rf_w or curr_rf_w <= 1:
+                curr_rf_w = 700
+            if not curr_rf_h or curr_rf_h <= 1:
+                curr_rf_h = 500
         except Exception:
-            curr_rf = 700
-        try:
-            right_frame.configure(width=curr_rf + delta)
-        except Exception:
-            pass
+            curr_rf_w = 700
+            curr_rf_h = 500
 
         try:
-            root.geometry(f"{base_w + delta}x{base_h}")
+            new_w = int(curr_rf_w * 1.2)
+            new_h = int(curr_rf_h * 1.2)
+            right_frame.configure(width=new_w, height=new_h)
+            try:
+                # prevent pack from shrinking the frame back to children size
+                right_frame.pack_propagate(False)
+            except Exception:
+                pass
+            try:
+                # resize the canvas inside the palette to match (subtract padding)
+                pad_x = 20
+                pad_y = 20
+                palette.canvas.config(width=max(10, new_w - pad_x), height=max(10, new_h - pad_y))
+            except Exception:
+                pass
         except Exception:
-            pass
+            try:
+                right_frame.configure(width=int(curr_rf_w * 1.2))
+            except Exception:
+                pass
     except Exception:
         pass
 
