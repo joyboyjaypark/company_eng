@@ -408,8 +408,13 @@ class Palette:
         for p in self.points:
             sx, sy = self.model_to_screen(p.mx, p.my)
             color = "red" if p.kind == "inlet" else "blue"
-            r = 5
-            p.canvas_id = self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r, fill=color, outline="")
+            # Scale point radius with current zoom. Base radius 5px at INITIAL_SCALE.
+            try:
+                base_r = 5.0
+                r_px = max(2, int(round(base_r * (self.scale_factor / INITIAL_SCALE))))
+            except Exception:
+                r_px = 5
+            p.canvas_id = self.canvas.create_oval(sx - r_px, sy - r_px, sx + r_px, sy + r_px, fill=color, outline="")
             label = f"{p.flow:.1f}"
             p.text_id = self.canvas.create_text(sx + 10, sy - 10, text=label, fill="black", font=("Arial", 8))
 
@@ -449,6 +454,32 @@ class Palette:
                 seg.leader_id = self.canvas.create_line(hx, hy, hx, hy - leader_length_px, fill="blue")
                 tx, ty = hx, hy - leader_length_px - text_offset_px
                 seg.text_id = self.canvas.create_text(tx, ty, text=seg.label_text, fill="blue", font=("Arial", 8), anchor="s", tags=text_tags)
+
+        # --- Alignment guide: when mouse aligns with any inlet/outlet (X or Y), draw temporary dashed line
+        try:
+            if self.current_mouse_model is not None and self.points:
+                mx_mouse, my_mouse = self.current_mouse_model
+                sx_mouse, sy_mouse = self.model_to_screen(mx_mouse, my_mouse)
+                ALIGN_TOL_PX = 6
+
+                for pt in self.points:
+                    if getattr(pt, 'kind', None) not in ('inlet', 'outlet'):
+                        continue
+                    sx_p, sy_p = self.model_to_screen(pt.mx, pt.my)
+
+                    # Horizontal alignment (same Y): draw horizontal dashed guide to nearest grid X
+                    if abs(sy_mouse - sy_p) <= ALIGN_TOL_PX:
+                        snapped_x, _ = self.snap_model(mx_mouse, my_mouse)
+                        sx_grid, _ = self.model_to_screen(snapped_x, pt.my)
+                        self.canvas.create_line(sx_p, sy_p, sx_grid, sy_p, fill="darkorange", dash=(4, 3), width=1, tags=("align_guide",))
+
+                    # Vertical alignment (same X): draw vertical dashed guide to nearest grid Y
+                    if abs(sx_mouse - sx_p) <= ALIGN_TOL_PX:
+                        _, snapped_y = self.snap_model(mx_mouse, my_mouse)
+                        _, sy_grid = self.model_to_screen(pt.mx, snapped_y)
+                        self.canvas.create_line(sx_p, sy_p, sx_p, sy_grid, fill="darkorange", dash=(4, 3), width=1, tags=("align_guide",))
+        except Exception:
+            pass
 
     # 툴팁 기능 제거: 마우스 위치에 자동 계산되는 텍스트 박스는 더 이상 표시하지 않음
 
