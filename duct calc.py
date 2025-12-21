@@ -100,7 +100,8 @@ def calc_rect_other_side(D1: float, fixed_side_mm: float, step: float = 50):
 def perform_sizing(q: float, dp: float, use_fixed: bool, fixed_val: float, aspect_r: float):
     """사이징 옵션(종횡비 vs 고정변)에 따라 적절한 함수를 호출하여 결과 반환"""
     if q <= 0:
-        return 0, 0, f"{int(q)}m³/h"
+        # 풍량이 0 이하거나 음수인 경우에도 일관된 라벨 포맷으로 반환
+        return 0, 0, f"0x0\n(0 m³/h)"
     try:
         D1 = calc_circular_diameter(q, dp)
         if use_fixed:
@@ -108,11 +109,18 @@ def perform_sizing(q: float, dp: float, use_fixed: bool, fixed_val: float, aspec
             # 고정 변 모드에서는 이론치 계산 생략
         else:
             w, h, de, theo_big, theo_small = size_rect_from_D1(D1, aspect_r, 50)
-        
-        label = f"{w}x{h} {int(q)}m³/h"
+        # 라벨 포맷: 첫 줄은 사이즈, 두번째 줄은 괄호 안의 천단위 쉼표가 적용된 풍량
+        size_line = f"{w}x{h}"
+        flow_fmt = f"({int(round(q)):,} m³/h)"
+        label = f"{size_line}\n{flow_fmt}"
         return w, h, label
     except Exception:
-        return 0, 0, f"{int(q)}m³/h"
+        # 예외 발생 시에도 일관된 포맷으로 안전하게 반환
+        try:
+            flow_fmt = f"({int(round(q)):,} m³/h)"
+        except Exception:
+            flow_fmt = "(0 m³/h)"
+        return 0, 0, f"0x0\n{flow_fmt}"
 
 
 # =========================
@@ -518,14 +526,25 @@ class Palette:
         self.redraw_all()
 
     def _hit_test_segment(self, mx, my, tol=0.1):
+        # 수집된 후보들 중에서 가장 짧은 덕트를 반환하도록 개선
+        candidates = []
         for seg in self.segments:
             if seg.vertical_only:
                 if min(seg.my1, seg.my2) - tol <= my <= max(seg.my1, seg.my2) + tol:
-                    if abs(mx - seg.mx1) <= tol: return seg
+                    if abs(mx - seg.mx1) <= tol:
+                        candidates.append(seg)
             else:
                 if min(seg.mx1, seg.mx2) - tol <= mx <= max(seg.mx1, seg.mx2) + tol:
-                    if abs(my - seg.my1) <= tol: return seg
-        return None
+                    if abs(my - seg.my1) <= tol:
+                        candidates.append(seg)
+        if not candidates:
+            return None
+        # 여러 후보 중 길이(length_m)가 가장 짧은 세그먼트를 선택
+        try:
+            shortest = min(candidates, key=lambda s: s.length_m())
+            return shortest
+        except Exception:
+            return candidates[0]
 
     def set_inlet_flow(self, flow):
         self.push_undo()
@@ -1333,14 +1352,30 @@ class Palette:
                     if current_main_flow <= 0: break
                     create_seg(right_nodes[i]['pos'], y_main, right_nodes[i+1]['pos'], y_main, current_main_flow, False)
 
+            # Create non-overlapping vertical headers grouped by takeoff X
+            pos_map = {}
+            for node in main_nodes:
+                pos_map.setdefault(node['pos'], []).append(node)
+
+            for takeoff_x, nodes_at_x in pos_map.items():
+                ys = sorted(set([y_main] + [n['grp_coord'] for n in nodes_at_x]))
+                if len(ys) <= 1:
+                    continue
+                for i in range(len(ys) - 1):
+                    y0 = ys[i]; y1 = ys[i+1]
+                    mid = (y0 + y1) / 2.0
+                    if mid > y_main:
+                        flow = sum(n['flow'] for n in nodes_at_x if n['grp_coord'] >= y1 - 1e-9)
+                    else:
+                        flow = sum(n['flow'] for n in nodes_at_x if n['grp_coord'] <= y0 + 1e-9)
+                    create_seg(takeoff_x, y0, takeoff_x, y1, flow, True)
+
+            # Branches & Headers (horizontal distribution) — no per-node riser creation here
             for node in main_nodes:
                 takeoff_x = node['pos']
                 grp_y = node['grp_coord']
                 grp_outlets = node['outlets']
-                
-                if abs(y_main - grp_y) > 1e-6:
-                    create_seg(takeoff_x, y_main, takeoff_x, grp_y, node['flow'], True)
-                
+
                 sorted_outs = sorted(grp_outlets, key=lambda o: o.mx)
                 h_left = [o for o in sorted_outs if o.mx < takeoff_x - 1e-6]
                 if h_left:
