@@ -129,6 +129,7 @@ def perform_sizing(q: float, dp: float, use_fixed: bool, fixed_val: float, aspec
 
 GRID_STEP_MODEL = 0.5
 INITIAL_SCALE = 40.0
+velocity_check_var = None
 
 class AirPoint:
     def __init__(self, mx, my, kind, flow):
@@ -454,14 +455,56 @@ class Palette:
                 vx, vy = mid_sx, mid_sy
                 seg.leader_id = self.canvas.create_line(vx, vy, vx + leader_length_px, vy, fill="blue")
                 tx, ty = vx + leader_length_px + text_offset_px, vy
-                seg.text_id = self.canvas.create_text(tx, ty, text=seg.label_text, fill="blue", font=("Arial", 8), anchor="w", tags=text_tags)
+                # optionally append velocity (m/s) if 검사->유속체크가 켜져있으면
+                try:
+                    vel_text = ""
+                    vvar = getattr(self, 'velocity_check_var', None)
+                    if vvar is None:
+                        vvar = globals().get('velocity_check_var', None)
+                    if vvar is not None and vvar.get():
+                        q_m3h = getattr(seg, 'flow', 0.0)
+                        w_mm = getattr(seg, 'duct_w_mm', 0)
+                        h_mm = getattr(seg, 'duct_h_mm', 0)
+                        area_m2 = 0.0
+                        if w_mm > 0 and h_mm > 0:
+                            area_m2 = (w_mm/1000.0) * (h_mm/1000.0)
+                        elif w_mm > 0:
+                            # assume circular diameter
+                            r = (w_mm/1000.0) / 2.0
+                            area_m2 = math.pi * r * r
+                        if area_m2 > 0 and q_m3h > 0:
+                            vel = (q_m3h/3600.0) / area_m2
+                            vel_text = f" - {vel:.2f} m/s"
+                except Exception:
+                    vel_text = ""
+                seg.text_id = self.canvas.create_text(tx, ty, text=seg.label_text + vel_text, fill="blue", font=("Arial", 8), anchor="w", tags=text_tags)
             else: # 가로선
                 mid_sx = (sx1 + sx2) / 2.0
                 mid_sy = sy1
                 hx, hy = mid_sx, mid_sy
                 seg.leader_id = self.canvas.create_line(hx, hy, hx, hy - leader_length_px, fill="blue")
                 tx, ty = hx, hy - leader_length_px - text_offset_px
-                seg.text_id = self.canvas.create_text(tx, ty, text=seg.label_text, fill="blue", font=("Arial", 8), anchor="s", tags=text_tags)
+                try:
+                    vel_text = ""
+                    vvar = getattr(self, 'velocity_check_var', None)
+                    if vvar is None:
+                        vvar = globals().get('velocity_check_var', None)
+                    if vvar is not None and vvar.get():
+                        q_m3h = getattr(seg, 'flow', 0.0)
+                        w_mm = getattr(seg, 'duct_w_mm', 0)
+                        h_mm = getattr(seg, 'duct_h_mm', 0)
+                        area_m2 = 0.0
+                        if w_mm > 0 and h_mm > 0:
+                            area_m2 = (w_mm/1000.0) * (h_mm/1000.0)
+                        elif w_mm > 0:
+                            r = (w_mm/1000.0) / 2.0
+                            area_m2 = math.pi * r * r
+                        if area_m2 > 0 and q_m3h > 0:
+                            vel = (q_m3h/3600.0) / area_m2
+                            vel_text = f" - {vel:.2f} m/s"
+                except Exception:
+                    vel_text = ""
+                seg.text_id = self.canvas.create_text(tx, ty, text=seg.label_text + vel_text, fill="blue", font=("Arial", 8), anchor="s", tags=text_tags)
 
         # --- Alignment guide: when mouse aligns with any inlet/outlet (X or Y), draw temporary dashed line
         try:
@@ -1898,7 +1941,7 @@ def create_app():
     # expose commonly used widgets as module-level globals so callbacks can access them
     global cubic_meter_hour_entry, resistance_entry, aspect_ratio_combo, fixed_side_var, fixed_side_entry
     global results_text_widget, relpos_text_widget, palette
-    global pressure_combo, low_rule_pairs, high_rule_pairs
+    global pressure_combo, low_rule_pairs, high_rule_pairs, velocity_check_var
 
     # 좌측 정보 입력창 (라벨프레임으로 묶음)
     info_frame = tk.LabelFrame(main_frame, text="환경 입력", width=180)
@@ -1935,6 +1978,17 @@ def create_app():
     pressure_combo = ttk.Combobox(tab_thickness, values=["저압","고압"], state="readonly", width=8)
     pressure_combo.current(0)
     pressure_combo.grid(row=0, column=1, sticky="w", padx=6, pady=(6,2))
+
+    # 검사 탭: 유속 체크
+    tab_check = tk.Frame(notebook)
+    notebook.add(tab_check, text="검사")
+    velocity_check_var = tk.BooleanVar(value=False)
+    def on_velocity_toggle():
+        try:
+            palette.redraw_all()
+        except Exception:
+            pass
+    tk.Checkbutton(tab_check, text="유속체크", variable=velocity_check_var, command=on_velocity_toggle).grid(row=0, column=0, sticky="w", padx=6, pady=6)
 
     # Default 체크박스: 체크하면 규칙을 초기값으로 복원
     default_rules_var = tk.BooleanVar(value=False)
@@ -2175,6 +2229,11 @@ def create_app():
     # 팔레트 초기화
     global palette
     palette = Palette(right_frame)
+    # expose velocity_check_var to palette so redraw can read it reliably
+    try:
+        palette.velocity_check_var = velocity_check_var
+    except Exception:
+        palette.velocity_check_var = None
     # Outlet relative-position statistics removed; no callback for it
     palette.sheet_changed_callback = update_sheet_area
     # Do not call update_sheet_area here on startup to avoid showing initial total
