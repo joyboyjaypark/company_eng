@@ -680,25 +680,78 @@ class Palette:
 
         remaining = self._calc_remaining_flow(exclude=target)
         current = target.flow
-        msg = (
+
+        # custom dialog: entry for flow, delete button
+        top = tk.Toplevel(self.canvas)
+        try:
+            top.transient(self.canvas.winfo_toplevel())
+        except Exception:
+            pass
+        top.title("Air outlet 풍량 입력")
+        lbl = tk.Label(top, text=(
             f"포인트 번호: [{point_number}]\n"
             f"Air inlet 풍량: {self.inlet_flow:.1f} m³/h\n"
             f"다른 outlet에 분배된 풍량 합계: {self._sum_outlet_flow(exclude=target):.1f} m³/h\n"
             f"남은 풍량(참고용): {remaining:.1f} m³/h\n"
             f"현 지점(outlet) 현재 풍량: {current:.1f} m³/h\n\n"
-            f"이 outlet의 풍량을 입력하세요:"
-        )
-        answer = simpledialog.askstring("Air outlet 풍량 입력", msg)
-        if answer is None: return
+            f"이 outlet의 풍량을 입력하세요:"))
+        lbl.pack(padx=10, pady=8)
+
+        entry = tk.Entry(top)
+        entry.pack(padx=10, pady=(0,8))
+        entry.insert(0, str(current))
+
+        btn_frame = tk.Frame(top)
+        btn_frame.pack(padx=10, pady=8)
+
+        def on_ok():
+            val = entry.get()
+            try:
+                new_flow = float(val)
+                if new_flow < 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showerror("입력 오류", "0 이상 숫자로 입력해주세요.")
+                return
+            try:
+                self.push_undo()
+            except Exception:
+                pass
+            target.flow = new_flow
+            try: self.redraw_all()
+            except: pass
+            top.destroy()
+
+        def on_delete():
+            try:
+                self.push_undo()
+            except Exception:
+                pass
+            try:
+                # remove the target point
+                if target in self.points:
+                    self.points.remove(target)
+            except Exception:
+                pass
+            # clear segments and refresh
+            try:
+                self.segments.clear()
+            except Exception:
+                pass
+            try: self.redraw_all()
+            except: pass
+            try: self._notify_points_changed()
+            except: pass
+            top.destroy()
+
+        tk.Button(btn_frame, text="확인", command=on_ok).grid(row=0, column=0, padx=4)
+        tk.Button(btn_frame, text="삭제", command=on_delete).grid(row=0, column=1, padx=4)
+        tk.Button(btn_frame, text="취소", command=top.destroy).grid(row=0, column=2, padx=4)
         try:
-            new_flow = float(answer)
-            if new_flow < 0: raise ValueError
-        except ValueError:
-            messagebox.showerror("입력 오류", "0 이상 숫자로 입력해주세요.")
-            return
-        self.push_undo()
-        target.flow = new_flow
-        self.redraw_all()
+            top.grab_set()
+            top.wait_window()
+        except Exception:
+            pass
 
     def _find_point_near_model(self, mx, my, tol_model=0.3):
         for p in self.points:
