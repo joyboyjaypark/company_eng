@@ -22,7 +22,7 @@ class RectShape:
         self.snap_highlight_sides = set()  # 스냅으로 강조된 변 이름들
 
 
-class RectCanvas:
+class Palette:
     """팔레트 하나(캔버스)와 그 안의 모든 도형/동작을 관리하는 클래스"""
 
     def __init__(self, parent, app, width=900, height=600):
@@ -1969,7 +1969,7 @@ class ResizableRectApp:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        self.rect_canvases = []
+        self.palettes = []
         self.add_new_tab()
 
         self.root.bind_all("<Control-z>", lambda e: self.undo_current())
@@ -1981,7 +1981,7 @@ class ResizableRectApp:
         except Exception:
             messagebox.showerror("입력 오류", "일반 발열량에 숫자를 입력하세요.")
             return
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if rc:
             rc.apply_norm_to_all(v)
 
@@ -1991,12 +1991,12 @@ class ResizableRectApp:
         except Exception:
             messagebox.showerror("입력 오류", "장비 발열량에 숫자를 입력하세요.")
             return
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if rc:
             rc.apply_equip_to_all(v)
         
     def _on_calc_supply_flow(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if not rc:
             messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
             return
@@ -2010,7 +2010,7 @@ class ResizableRectApp:
             messagebox.showinfo("결과", f"총 급기 풍량: {total:.1f} m3/hr")
             
     def _on_place_diffusers(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if not rc:
             messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
             return
@@ -2023,27 +2023,27 @@ class ResizableRectApp:
             return
         rc.auto_place_diffusers(a)
 
-    def get_current_rect_canvas(self) -> RectCanvas | None:
+    def get_current_palette(self) -> Palette | None:
         if not self.notebook.tabs():
             return None
         idx = self.notebook.index(self.notebook.select())
-        if 0 <= idx < len(self.rect_canvases):
-            return self.rect_canvases[idx]
+        if 0 <= idx < len(self.palettes):
+            return self.palettes[idx]
         return None
 
     def add_new_tab(self):
         tab = tk.Frame(self.notebook)
-        self.notebook.add(tab, text=f"팔레트 {len(self.rect_canvases)+1}")
-        self.notebook.select(len(self.rect_canvases))
-        rc = RectCanvas(tab, app=self)
-        self.rect_canvases.append(rc)
+        self.notebook.add(tab, text=f"팔레트 {len(self.palettes)+1}")
+        self.notebook.select(len(self.palettes))
+        rc = Palette(tab, app=self)
+        self.palettes.append(rc)
 
     def delete_current_tab(self):
-        if not self.rect_canvases:
+        if not self.palettes:
             return
 
         current_index = self.notebook.index(self.notebook.select())
-        if len(self.rect_canvases) == 1:
+        if len(self.palettes) == 1:
             messagebox.showinfo(
                 "삭제 불가",
                 "마지막 팔레트는 삭제할 수 없습니다.\n새 팔레트를 추가한 후 삭제해 주세요."
@@ -2058,7 +2058,7 @@ class ResizableRectApp:
         if not answer:
             return
 
-        rc_to_delete = self.rect_canvases[current_index]
+        rc_to_delete = self.palettes[current_index]
         rc_to_delete.shapes.clear()
         rc_to_delete.generated_space_labels.clear()
         rc_to_delete.canvas.delete("all")
@@ -2072,11 +2072,11 @@ class ResizableRectApp:
         if 0 <= current_index < len(tabs):
             tab_id = tabs[current_index]
             self.notebook.forget(tab_id)
-        if 0 <= current_index < len(self.rect_canvases):
-            del self.rect_canvases[current_index]
+        if 0 <= current_index < len(self.palettes):
+            del self.palettes[current_index]
 
     def clear_current_palette(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if not rc:
             return
 
@@ -2102,7 +2102,7 @@ class ResizableRectApp:
         self.update_selected_area_label(rc)
 
     def draw_square_from_area_current(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if not rc:
             return
         s = self.area_entry.get().strip()
@@ -2113,17 +2113,17 @@ class ResizableRectApp:
         rc.draw_square_from_area(area)
 
     def undo_current(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if rc:
             rc.undo()
 
     def auto_generate_current(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if rc:
             rc.auto_generate_space_labels()
 
     def save_current(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if not rc:
             return
         file_path = filedialog.asksaveasfilename(
@@ -2141,7 +2141,7 @@ class ResizableRectApp:
             messagebox.showerror("저장 오류", f"파일 저장 중 오류가 발생했습니다.\n{e}")
 
     def load_current(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if not rc:
             return
         file_path = filedialog.askopenfilename(
@@ -2158,7 +2158,7 @@ class ResizableRectApp:
         except Exception as e:
             messagebox.showerror("불러오기 오류", f"파일 불러오기 중 오류가 발생했습니다.\n{e}")
 
-    def update_selected_area_label(self, rc: RectCanvas | None):
+    def update_selected_area_label(self, rc: Palette | None):
         if not rc or not rc.active_shape:
             self.area_label_var.set("선택 도형 면적: - m²")
             return
@@ -2168,7 +2168,7 @@ class ResizableRectApp:
         self.area_label_var.set(f"선택 도형 면적: {w*h:.3f} m²")
 
     def _on_check_diffusers(self):
-        rc = self.get_current_rect_canvas()
+        rc = self.get_current_palette()
         if not rc:
             messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
             return
