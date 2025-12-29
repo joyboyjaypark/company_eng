@@ -6,6 +6,14 @@ import json
 # Shapely 관련 import
 from shapely.geometry import Polygon, LineString, Point
 from shapely.ops import unary_union, polygonize
+import re
+
+# HVAC type names
+HVAC_NAMES = {
+    1: "중앙공조",
+    2: "개별공조",
+    3: "비공조",
+}
 
 
 class RectShape:
@@ -1111,12 +1119,56 @@ class Palette:
         lab = self._find_space_label_by_item(item_id)
         if not lab:
             return
+        # current name and hvac
         old = self.canvas.itemcget(lab["name_id"], "text")
-        new = simpledialog.askstring("공간 이름 변경", "새로운 공간 이름:", initialvalue=old)
-        if not new:
-            return
-        self.push_history()
-        self.canvas.itemconfigure(lab["name_id"], text=new.strip())
+        # extract bare name (remove existing hvac suffix like 'Room 1(1. 중앙공조)')
+        m = re.match(r"^(.*?)(\s*\(\d+\..*\))?$", old)
+        base_name = m.group(1).strip() if m else old
+
+        # popup dialog with entry + combobox
+        dlg = tk.Toplevel(self.canvas.master)
+        dlg.transient(self.canvas.master)
+        dlg.title("공간 편집")
+        tk.Label(dlg, text="공간 이름:").grid(row=0, column=0, padx=6, pady=6)
+        name_entry = tk.Entry(dlg, width=30)
+        name_entry.grid(row=0, column=1, padx=6, pady=6)
+        name_entry.insert(0, base_name)
+
+        tk.Label(dlg, text="공조 방식:").grid(row=1, column=0, padx=6, pady=6)
+        from tkinter import ttk
+        hvac_var = tk.StringVar()
+        combo = ttk.Combobox(dlg, textvariable=hvac_var, state='readonly', width=20)
+        combo['values'] = [f"{k}. {v}" for k, v in HVAC_NAMES.items()]
+        # current hvac
+        cur_hvac = lab.get("hvac_type", 1)
+        combo.current(int(cur_hvac) - 1 if cur_hvac in HVAC_NAMES else 0)
+        combo.grid(row=1, column=1, padx=6, pady=6)
+
+        def on_ok():
+            new_name = name_entry.get().strip()
+            if not new_name:
+                return
+            sel = combo.get()
+            num = 1
+            try:
+                num = int(sel.split('.')[0])
+            except Exception:
+                num = 1
+            # set name with hvac suffix
+            full = f"{new_name}({num}. {HVAC_NAMES.get(num, '')})"
+            self.push_history()
+            self.canvas.itemconfigure(lab["name_id"], text=full)
+            lab["hvac_type"] = num
+            dlg.destroy()
+
+        def on_cancel():
+            dlg.destroy()
+
+        ok_btn = tk.Button(dlg, text="확인", command=on_ok)
+        ok_btn.grid(row=2, column=0, padx=6, pady=8)
+        cancel_btn = tk.Button(dlg, text="취소", command=on_cancel)
+        cancel_btn.grid(row=2, column=1, padx=6, pady=8)
+        name_entry.focus_set()
 
     def on_space_heat_norm_click(self, event):
         item_id = event.widget.find_closest(event.x, event.y)[0]
@@ -1320,9 +1372,16 @@ class Palette:
 
                 self.canvas.itemconfigure(area_id, text=f"{area_m2:.2f} m²")
                 if matched_room_number is not None:
-                    self.canvas.itemconfigure(name_id, text=f"Room {matched_room_number}")
+                    # preserve hvac_type if present in matched
+                    hv = matched.get('hvac_type', 1) if isinstance(matched, dict) else 1
+                    self.canvas.itemconfigure(name_id, text=f"Room {matched_room_number}({hv}. {HVAC_NAMES.get(hv, '')})")
                 else:
-                    self.canvas.itemconfigure(name_id, text=matched_name)
+                    # if matched_name has hvac in suffix preserve, else leave as-is
+                    if '(' in matched_name and ')' in matched_name:
+                        self.canvas.itemconfigure(name_id, text=matched_name)
+                    else:
+                        hv = matched.get('hvac_type', 1) if isinstance(matched, dict) else 1
+                        self.canvas.itemconfigure(name_id, text=f"{matched_name}({hv}. {HVAC_NAMES.get(hv, '')})")
                 self.canvas.itemconfigure(heat_norm_id, text=matched_norm)
                 self.canvas.itemconfigure(heat_equip_id, text=matched_equip)
 
@@ -1372,14 +1431,20 @@ class Palette:
                     font=("Arial", 10)
                 )
 
+                # default hvac type = 1 (중앙공조)
+                hvac_type = 1
+                name_text_with_hvac = f"{name_text}({hvac_type}. {HVAC_NAMES.get(hvac_type)})"
                 new_labels.append({
                     "polygon": p,
                     "name_id": name_id,
                     "heat_norm_id": heat_norm_id,
                     "heat_equip_id": heat_equip_id,
                     "area_id": area_id,
-                    "diffuser_ids": []
+                    "diffuser_ids": [],
+                    "hvac_type": hvac_type
                 })
+                # set displayed name including hvac
+                self.canvas.itemconfigure(name_id, text=name_text_with_hvac)
 
         # 기존 라벨 중 사용되지 않은 것 삭제
         for lab in self.generated_space_labels:
@@ -1465,13 +1530,46 @@ class Palette:
 
                 flow_text = f"{flow_int:,}"
 
-                if "flow_id" in lab and lab["flow_id"] in self.canvas.find_all():
-                    self.canvas.itemconfigure(lab["flow_id"], text=f"Flow: {flow_text} m3/hr")
-                else:
-                    x, y = self.canvas.coords(lab["area_id"])
-                    fid = self.canvas.create_text(x, y + 14, text=f"Flow: {flow_text} m3/hr",
-                                                  fill="purple", font=("Arial", 10))
-                    lab["flow_id"] = fid
+                # Try to update existing flow text if present
+                updated = False
+                if "flow_id" in lab:
+                    try:
+                        fid = lab["flow_id"]
+                        if fid in self.canvas.find_all():
+                            self.canvas.itemconfigure(fid, text=f"Flow: {flow_text} m3/hr")
+                            updated = True
+                        else:
+                            # stale id, remove key
+                            lab.pop("flow_id", None)
+                    except Exception:
+                        lab.pop("flow_id", None)
+
+                if not updated:
+                    # remove any stray flow texts near the area to avoid duplicates
+                    try:
+                        x, y = self.canvas.coords(lab["area_id"])
+                        # small bbox around area text
+                        bx1, by1 = x - 10, y
+                        bx2, by2 = x + 10, y + 28
+                        for item in self.canvas.find_overlapping(bx1, by1, bx2, by2):
+                            try:
+                                if self.canvas.type(item) == 'text':
+                                    txt = self.canvas.itemcget(item, 'text')
+                                    if isinstance(txt, str) and txt.strip().startswith('Flow:'):
+                                        self.canvas.delete(item)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                    # create new flow text and tag it
+                    try:
+                        x, y = self.canvas.coords(lab["area_id"])
+                        fid = self.canvas.create_text(x, y + 14, text=f"Flow: {flow_text} m3/hr",
+                                                      fill="purple", font=("Arial", 10), tags=("flow",))
+                        lab["flow_id"] = fid
+                    except Exception:
+                        pass
             except Exception:
                 continue
 
@@ -1764,7 +1862,12 @@ class Palette:
                 for did in lab["diffuser_ids"]:
                     if did in self.canvas.find_all():
                         self.canvas.delete(did)
+                # also delete any diffuser label texts
+                for tid in lab.get("diffuser_label_ids", []):
+                    if tid in self.canvas.find_all():
+                        self.canvas.delete(tid)
                 lab["diffuser_ids"].clear()
+                lab["diffuser_label_ids"] = []
 
         # 각 실별 디퓨저 생성
         for lab in self.generated_space_labels:
@@ -1793,15 +1896,57 @@ class Palette:
             # 위치 계산 및 그리기
             pts = self._generate_diffuser_points_for_poly(poly, n)
             diffuser_ids = []
-            radius = 3  # 녹색 점 반지름
-            for (x, y) in pts:
-                did = self.canvas.create_oval(
-                    x - radius, y - radius, x + radius, y + radius,
-                    fill="green", outline=""
-                )
-                diffuser_ids.append(did)
+            diffuser_label_ids = []
+            radius = 3
+            # cluster pts into rows by y coordinate
+            spacing_px = max(1.0, self.meter_to_pixel(0.5))
+            row_thresh = max(2.0, spacing_px * 0.5)
+            pts_sorted = sorted(pts, key=lambda p: (p[1], p[0]))
+            rows = []
+            for (x, y) in pts_sorted:
+                if not rows:
+                    rows.append([(x, y)])
+                    continue
+                last_row = rows[-1]
+                # compare to median y of last_row
+                ys = [pt[1] for pt in last_row]
+                med_y = sum(ys) / len(ys)
+                if abs(y - med_y) <= row_thresh:
+                    last_row.append((x, y))
+                else:
+                    rows.append([(x, y)])
+
+            # sort each row by x (left to right)
+            for i in range(len(rows)):
+                rows[i].sort(key=lambda p: p[0])
+
+            # assign Supply/Return alternating starting with (1,1)=Supply
+            for ri, row in enumerate(rows):
+                for ci, (x, y) in enumerate(row):
+                    # parity: supply if (ri + ci) % 2 == 0
+                    is_supply = ((ri + ci) % 2 == 0)
+                    color = "green" if is_supply else "skyblue"
+                    tag2 = "supply" if is_supply else "return"
+                    did = self.canvas.create_oval(
+                        x - radius, y - radius, x + radius, y + radius,
+                        fill=color, outline="", tags=("diffuser", tag2)
+                    )
+                    # create label next to the diffuser
+                    try:
+                        tid = self.canvas.create_text(x + radius + 4, y,
+                                                      text=("S" if is_supply else "R"),
+                                                      anchor=tk.W,
+                                                      fill=color,
+                                                      font=("Arial", 8, "bold"),
+                                                      tags=("diffuser_label", tag2))
+                    except Exception:
+                        tid = None
+                    diffuser_ids.append(did)
+                    if tid:
+                        diffuser_label_ids.append(tid)
 
             lab["diffuser_ids"] = diffuser_ids
+            lab["diffuser_label_ids"] = diffuser_label_ids
 
     # -------- 저장/불러오기용 직렬화 --------
 
@@ -1847,6 +1992,8 @@ class Palette:
                 "heat_equip_pos": [equip_x, equip_y],
                 "area_pos": [area_x, area_y],
                 "diffuser_coords": diffuser_coords
+                ,
+                "hvac_type": int(lab.get("hvac_type", 1))
             })
         # save grid visibility
         data["show_grid"] = bool(getattr(self, 'show_grid', False))
@@ -1920,7 +2067,8 @@ class Palette:
                 "heat_norm_id": heat_norm_id,
                 "heat_equip_id": heat_equip_id,
                 "area_id": area_id,
-                "diffuser_ids": diffuser_ids
+                "diffuser_ids": diffuser_ids,
+                "hvac_type": int(lab.get("hvac_type", 1))
             })
 
         # 태그 바인딩 복원
