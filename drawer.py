@@ -68,8 +68,7 @@ class Palette:
 
         # 코너 삭제용 팝업 메뉴
         self.corner_menu = tk.Menu(self.canvas, tearoff=0)
-        self.corner_menu.add_command(label="삭제하기",
-                                     command=self.delete_corner_shape)
+        self.corner_menu.add_command(label="삭제하기", command=self.delete_corner_shape)
         self.corner_menu_target_shape = None
 
         # 자동생성 공간 라벨
@@ -79,6 +78,12 @@ class Palette:
         #   "diffuser_ids": [id1, id2, ...] (캔버스 아이템 ID 리스트)
         # }
         self.generated_space_labels = []
+
+        # 격자 관련 상태: 기본으로 보이게 설정
+        self.grid_ids = []
+        self.show_grid = True
+        # debounce handle for panning redraws
+        self._grid_redraw_after_id = None
 
         # 이벤트 바인딩
         self.canvas.bind("<Motion>", self.on_mouse_move)
@@ -104,6 +109,14 @@ class Palette:
         self.canvas.tag_bind("space_heat_norm", "<Button-1>", self.on_space_heat_norm_click)
         self.canvas.tag_bind("space_heat_equip", "<Button-1>", self.on_space_heat_equip_click)
 
+        # 캔버스 크기 변경 시 그리드 갱신 바인딩
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        try:
+            # 초기 레이아웃 후 그리드를 한 번 그립니다
+            self.canvas.after(50, self.draw_grid)
+        except Exception:
+            pass
+
     # -------- 기본 유틸 --------
 
     def pixel_to_meter(self, length_px: float) -> float:
@@ -111,6 +124,133 @@ class Palette:
 
     def meter_to_pixel(self, length_m: float) -> float:
         return length_m * self.scale
+
+    def _on_canvas_configure(self, event=None):
+        if getattr(self, 'show_grid', False):
+            try:
+                self.draw_grid()
+            except Exception:
+                pass
+
+    def clear_grid(self):
+        for gid in list(getattr(self, 'grid_ids', [])):
+            try:
+                self.canvas.delete(gid)
+            except Exception:
+                pass
+        self.grid_ids = []
+
+    def toggle_grid(self, show: bool):
+        """Show or hide the grid. If showing, draw it for current viewport."""
+        self.show_grid = bool(show)
+        if self.show_grid:
+            try:
+                self.draw_grid()
+            except Exception:
+                pass
+        else:
+            try:
+                self.clear_grid()
+            except Exception:
+                pass
+
+    def draw_grid(self):
+        """Viewport-limited 0.5m grid. Coarsen spacing if too many lines to avoid UI freeze."""
+        # remove old grid
+        try:
+            self.clear_grid()
+        except Exception:
+            self.grid_ids = []
+
+        # get widget size
+        try:
+            w = int(self.canvas.winfo_width())
+            h = int(self.canvas.winfo_height())
+        except Exception:
+            w = int(self.canvas['width']) if 'width' in self.canvas.keys() else 800
+            h = int(self.canvas['height']) if 'height' in self.canvas.keys() else 600
+
+        # spacing in pixels for 0.5m
+        spacing = max(1.0, self.meter_to_pixel(0.5))
+
+        # visible region
+        try:
+            view_left = self.canvas.canvasx(0)
+            view_top = self.canvas.canvasy(0)
+            view_right = self.canvas.canvasx(w)
+            view_bottom = self.canvas.canvasy(h)
+        except Exception:
+            view_left, view_top, view_right, view_bottom = 0.0, 0.0, float(w), float(h)
+
+        # small margin to avoid tiny gaps (use larger margin to tolerate pan/rounding)
+        MARGIN_MULT = 2
+        view_left -= spacing * MARGIN_MULT
+        view_top -= spacing * MARGIN_MULT
+        view_right += spacing * MARGIN_MULT
+        view_bottom += spacing * MARGIN_MULT
+
+        import math
+        # Anchor grid to a stable reference so it stays aligned with shapes after zoom/pan.
+        # Use first shape's top-left as anchor if available, otherwise use world origin (0,0).
+        try:
+            if self.shapes:
+                anchor_x = float(self.shapes[0].coords[0])
+                anchor_y = float(self.shapes[0].coords[1])
+            else:
+                anchor_x = 0.0
+                anchor_y = 0.0
+        except Exception:
+            anchor_x = 0.0
+            anchor_y = 0.0
+
+        # compute remainder offset so anchor_x == (k*spacing + rem_x)
+        rem_x = anchor_x - math.floor(anchor_x / spacing) * spacing
+        rem_y = anchor_y - math.floor(anchor_y / spacing) * spacing
+
+        kmin = math.floor((view_left - rem_x) / spacing)
+        kmax = math.ceil((view_right - rem_x) / spacing)
+        hmin = math.floor((view_top - rem_y) / spacing)
+        hmax = math.ceil((view_bottom - rem_y) / spacing)
+
+        v_count = max(0, int(kmax - kmin + 1))
+        h_count = max(0, int(hmax - hmin + 1))
+
+        # cap total lines to avoid freezing
+        MAX_LINES = 1200
+        total = v_count + h_count
+        while total > MAX_LINES and spacing < max(w, h):
+            spacing *= 2
+            kmin = math.floor(view_left / spacing)
+            kmax = math.ceil(view_right / spacing)
+            hmin = math.floor(view_top / spacing)
+            hmax = math.ceil(view_bottom / spacing)
+            v_count = max(0, int(kmax - kmin + 1))
+            h_count = max(0, int(hmax - hmin + 1))
+            total = v_count + h_count
+
+        color = "#e6e6e6"
+        # draw vertical lines
+        for k in range(kmin, kmax + 1):
+            x = k * spacing + rem_x
+            try:
+                lid = self.canvas.create_line(x, view_top, x, view_bottom, fill=color, width=1, tags=("grid",))
+                self.grid_ids.append(lid)
+            except Exception:
+                continue
+
+        # draw horizontal lines
+        for k in range(hmin, hmax + 1):
+            y = k * spacing + rem_y
+            try:
+                lid = self.canvas.create_line(view_left, y, view_right, y, fill=color, width=1, tags=("grid",))
+                self.grid_ids.append(lid)
+            except Exception:
+                continue
+
+        try:
+            self.canvas.tag_lower("grid")
+        except Exception:
+            pass
 
     def push_history(self):
         snapshot = {
@@ -1431,150 +1571,138 @@ class Palette:
         return fallback
 
     def _generate_diffuser_points_for_poly(self, poly, N: int):
-        if N <= 0: return []
-        
-        # 1. Topology Fix (Shapely quirk: buffer(0) fixes invalid geometries)
-        poly = poly.buffer(0)
+        if N <= 0:
+            return []
 
-        # 2. Safety Margin (0.5m)
+        # 1. Fix topology and compute safe interior area
+        poly = poly.buffer(0)
         margin_m = 0.5
         margin_px = self.meter_to_pixel(margin_m)
         safe_poly = poly.buffer(-margin_px)
-
-        # Handle too small rooms
         if safe_poly.is_empty:
-            safe_poly = poly.buffer(-5)
-            if safe_poly.is_empty: safe_poly = poly
+            safe_poly = poly
 
-        # 3. Bounding Box of the *Original* Polygon (to keep alignment)
+        # 2. Bounding box (pixel coordinates)
         minx, miny, maxx, maxy = poly.bounds
         width = maxx - minx
         height = maxy - miny
+        if width <= 0 or height <= 0:
+            rep = poly.representative_point()
+            return [(rep.x, rep.y)]
 
-        # 4. Density Compensation for Non-Rectangular Shapes
-        # Bounding box area vs Actual area
-        bb_area = width * height
-        poly_area = poly.area
-        if poly_area < 1e-6: return []
-        
-        fill_ratio = poly_area / bb_area
-        # Avoid division by zero or extreme values.
-        fill_ratio = max(0.1, min(1.0, fill_ratio)) 
-        
-        # 보정된 그리드 타겟 개수
-        target_grid_count = int(N / fill_ratio)
-        
-        # 5. Grid Dimensions
-        r, c = self._decide_grid_rc(target_grid_count, width, height)
-        
-        dx = width / (c + 1)
-        dy = height / (r + 1)
+        # 3. Grid spacing (0.5m) in pixels
+        spacing = max(1.0, self.meter_to_pixel(0.5))
 
+        import math
+
+        # 4. Anchor grid to same reference used by draw_grid (first shape or origin)
+        try:
+            if self.shapes:
+                anchor_x = float(self.shapes[0].coords[0])
+                anchor_y = float(self.shapes[0].coords[1])
+            else:
+                anchor_x = 0.0
+                anchor_y = 0.0
+        except Exception:
+            anchor_x = 0.0
+            anchor_y = 0.0
+
+        rem_x = anchor_x - math.floor(anchor_x / spacing) * spacing
+        rem_y = anchor_y - math.floor(anchor_y / spacing) * spacing
+
+        # 5. Grid indices covering bbox
+        kmin = math.floor((minx - rem_x) / spacing)
+        kmax = math.ceil((maxx - rem_x) / spacing)
+        hmin = math.floor((miny - rem_y) / spacing)
+        hmax = math.ceil((maxy - rem_y) / spacing)
+
+        # 6. Build list of grid intersection points that lie inside safe_poly
         from shapely.geometry import Point as ShapelyPoint
-
-        # 6. Build a dense candidate grid inside safe_poly (step ~ 0.2m)
-        grid_step_m = 0.2
-        grid_step_px = max(1.0, self.meter_to_pixel(grid_step_m))
-
-        cand_x_start = int(minx // grid_step_px) * grid_step_px
-        cand_x_end = int(maxx // grid_step_px) * grid_step_px
-        cand_y_start = int(miny // grid_step_px) * grid_step_px
-        cand_y_end = int(maxy // grid_step_px) * grid_step_px
-
-        candidates = []
-        x = cand_x_start
-        while x <= cand_x_end:
-            y = cand_y_start
-            while y <= cand_y_end:
+        intersections = []
+        for k in range(kmin, kmax + 1):
+            x = k * spacing + rem_x
+            for j in range(hmin, hmax + 1):
+                y = j * spacing + rem_y
                 pt = ShapelyPoint(x, y)
                 if safe_poly.contains(pt):
-                    candidates.append((x, y))
-                y += grid_step_px
-            x += grid_step_px
+                    intersections.append((x, y))
 
-        # If no candidates found (very small room), fallback to sample few interior points
-        if not candidates:
+        # If no intersections, fallback to representative point
+        if not intersections:
             rep = poly.representative_point()
             return [(rep.x, rep.y)] * min(N, 1)
 
-        # 7. Create full ideal grid positions (aligned to bbox)
-        full_ideal = []
-        for j in range(1, r + 1):
-            for i in range(1, c + 1):
-                px = minx + i * dx
-                py = miny + j * dy
-                full_ideal.append((px, py))
+        # Remove duplicates (round to int pixels)
+        uniq = []
+        seen = set()
+        for (x, y) in intersections:
+            key = (round(x, 3), round(y, 3))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append((x, y))
+        intersections = uniq
 
-        # If more ideal positions than needed, pick N spread-out positions using greedy max-min
-        if len(full_ideal) <= N:
-            ideal_points = list(full_ideal)
+        # 7. Decide r x c layout to try to distribute N points in rows/cols
+        r, c = self._decide_grid_rc(N, width, height)
+        # create ideal cell centers (in bbox coordinates)
+        ideal_points = []
+        if r > 0 and c > 0:
+            dx = width / (c + 1)
+            dy = height / (r + 1)
+            for irow in range(1, r + 1):
+                for icol in range(1, c + 1):
+                    px = minx + icol * dx
+                    py = miny + irow * dy
+                    ideal_points.append((px, py))
         else:
-            ideal_points = self._select_points_greedy_maxmin(full_ideal, N)
+            # fallback to centroid-based selection
+            cx = sum(p[0] for p in intersections) / len(intersections)
+            cy = sum(p[1] for p in intersections) / len(intersections)
+            ideal_points = [(cx, cy)]
 
-        # 7b. Snap ideal cells to candidates preferably within the same bbox cell to avoid cross-cell clustering
-        # Build spatial index of candidates by grid cell (based on dx,dy)
-        cell_index = {}
-        if dx > 0 and dy > 0:
-            for idx, (cx, cy) in enumerate(candidates):
-                ci = int((cx - minx) // dx)
-                rj = int((cy - miny) // dy)
-                key = (ci, rj)
-                cell_index.setdefault(key, []).append(idx)
-
+        # 8. For each ideal point, choose nearest unused grid intersection (prefer within same cell radius)
         selected = []
-        used = set()
+        used_idx = set()
         for ip in ideal_points:
-            best_idx = None
+            best_i = None
             best_d2 = float('inf')
-            # try within same cell first
-            if dx > 0 and dy > 0:
-                ci = int((ip[0] - minx) // dx)
-                rj = int((ip[1] - miny) // dy)
-                # search this cell and expanding neighbors up to radius 2
-                found = False
-                for radius in range(0, 3):
-                    cells_to_check = []
-                    for di in range(-radius, radius + 1):
-                        for dj in range(-radius, radius + 1):
-                            cells_to_check.append((ci + di, rj + dj))
-                    for key in cells_to_check:
-                        for k in cell_index.get(key, []):
-                            if k in used:
-                                continue
-                            cpt = candidates[k]
-                            d2 = (cpt[0] - ip[0]) ** 2 + (cpt[1] - ip[1]) ** 2
-                            if d2 < best_d2:
-                                best_d2 = d2
-                                best_idx = k
-                                found = True
-                    if found:
-                        break
-            # fallback: global nearest unused candidate
-            if best_idx is None:
-                for k, cpt in enumerate(candidates):
-                    if k in used:
-                        continue
-                    d2 = (cpt[0] - ip[0]) ** 2 + (cpt[1] - ip[1]) ** 2
-                    if d2 < best_d2:
-                        best_d2 = d2
-                        best_idx = k
-            if best_idx is not None:
-                used.add(best_idx)
-                selected.append(candidates[best_idx])
+            # first try to find intersection within the surrounding cell radius (in pixel distance dx/2,dy/2)
+            radius_px = max(spacing, min(width, height))
+            for idx, pt in enumerate(intersections):
+                if idx in used_idx:
+                    continue
+                d2 = (pt[0] - ip[0]) ** 2 + (pt[1] - ip[1]) ** 2
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_i = idx
+            if best_i is not None:
+                used_idx.add(best_i)
+                selected.append(intersections[best_i])
+            if len(selected) >= N:
+                break
 
-        # 8. If still fewer than N, fill using min-separation-aware selection from remaining candidates
+        # 9. If still fewer than N, fill remaining by greedy selection with minimum separation
         if len(selected) < N:
-            remaining = [p for i, p in enumerate(candidates) if i not in used]
+            remaining = [p for i, p in enumerate(intersections) if i not in used_idx]
             min_sep_m = 1.0
             min_sep_px = self.meter_to_pixel(min_sep_m)
             more = self._select_with_min_separation(remaining, N - len(selected), min_sep_px)
             selected.extend(more)
 
-        # 9. Final trim
-        if len(selected) > N:
-            selected = selected[:N]
+        # 10. Final trim and ensure uniqueness
+        out = []
+        seen2 = set()
+        for (x, y) in selected:
+            key = (round(x, 3), round(y, 3))
+            if key in seen2:
+                continue
+            seen2.add(key)
+            out.append((x, y))
+            if len(out) >= N:
+                break
 
-        return selected
+        return out
 
     # Diagnostic: check diffusers in a named room
     def check_diffusers_in_room(self, room_name: str):
@@ -1720,6 +1848,8 @@ class Palette:
                 "area_pos": [area_x, area_y],
                 "diffuser_coords": diffuser_coords
             })
+        # save grid visibility
+        data["show_grid"] = bool(getattr(self, 'show_grid', False))
         return data
 
     def load_from_dict(self, data: dict):
@@ -1803,6 +1933,13 @@ class Palette:
         self.active_shape = None
         self.active_side_name = None
         self.app.update_selected_area_label(self)
+        # restore grid visibility
+        self.show_grid = bool(data.get("show_grid", False))
+        if getattr(self, 'show_grid', False):
+            try:
+                self.draw_grid()
+            except Exception:
+                pass
 
     # -------- 줌 / 팬 --------
 
@@ -1833,6 +1970,13 @@ class Palette:
 
         self.scale = new_scale
         self.app.update_selected_area_label(self)
+        # redraw grid to match new scale
+        try:
+            self.clear_grid()
+            if getattr(self, 'show_grid', False):
+                self.draw_grid()
+        except Exception:
+            pass
 
     def on_middle_button_down(self, event):
         self.push_history()
@@ -1855,6 +1999,14 @@ class Palette:
     def on_middle_button_up(self, event):
         self.panning = False
         self.pan_last_pos = None
+        # after panning, redraw grid for the new viewport
+        try:
+            if getattr(self, 'show_grid', False):
+                # clear any old grid items and draw fresh
+                self.clear_grid()
+                self.draw_grid()
+        except Exception:
+            pass
 
 
 # ================= 상위 App =================
