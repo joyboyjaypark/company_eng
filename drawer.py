@@ -1678,7 +1678,7 @@ class Palette:
     # -------- 저장/불러오기용 직렬화 --------
 
     def to_dict(self):
-        """현재 RectCanvas 상태를 JSON 직렬화용 dict로 반환"""
+        """현재 Palette 상태를 JSON 직렬화용 dict로 반환"""
         data = {
             "scale": self.scale,
             "shapes": [],
@@ -1723,7 +1723,7 @@ class Palette:
         return data
 
     def load_from_dict(self, data: dict):
-        """JSON dict로부터 RectCanvas 상태 복원"""
+        """JSON dict로부터 Palette 상태 복원"""
         self.canvas.delete("all")
         self.shapes.clear()
         self.generated_space_labels.clear()
@@ -1858,6 +1858,9 @@ class Palette:
 
 
 # ================= 상위 App =================
+
+# Backward compatibility: previous code used the name RectCanvas
+RectCanvas = Palette
 
 class ResizableRectApp:
     def __init__(self, root):
