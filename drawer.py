@@ -2186,82 +2186,100 @@ class ResizableRectApp:
         self.root = root
         self.root.title("도형 편집기 (디퓨저 배치 기능 추가됨)")
 
-        # left-side control panel
-        left_panel = tk.Frame(root, width=200)
+        # left-side control panel (wider so controls are not clipped)
+        left_panel = tk.Frame(self.root, width=280)
         left_panel.pack(side=tk.LEFT, fill=tk.Y)
-        control_frame = tk.Frame(left_panel)
-        control_frame.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+        left_panel.pack_propagate(False)
+
+        # Room Design labeled frame
+        room_frame = ttk.LabelFrame(left_panel, text="Room Design")
+        room_frame.pack(fill=tk.BOTH, expand=False, padx=6, pady=6)
+
+        # area controls at top of Room Design
+        area_ctrl = tk.Frame(room_frame)
+        area_ctrl.pack(side=tk.TOP, fill=tk.X, pady=(2, 4))
+        tk.Label(area_ctrl, text="면적 (m²):").pack(side=tk.LEFT)
+        self.area_entry = tk.Entry(area_ctrl, width=10)
+        self.area_entry.pack(side=tk.LEFT, padx=5)
+        draw_btn = tk.Button(area_ctrl, text="정사각형 그리기", command=self.draw_square_from_area_current)
+        draw_btn.pack(side=tk.LEFT, padx=5)
+        self.area_entry.bind("<Return>", lambda e: self.draw_square_from_area_current())
+
+        # small top area in the room frame to host the Auto-generate button above the inputs
+        top_ctrl = tk.Frame(room_frame)
+        top_ctrl.pack(side=tk.TOP, pady=(6, 4))
+        ag_btn = tk.Button(top_ctrl, text="자동생성", width=18, command=self.auto_generate_current)
+        ag_btn.pack()
+
+        # control area inside Room Design
+        control_frame = tk.Frame(room_frame)
+        control_frame.pack(fill=tk.BOTH, expand=False, padx=8, pady=4)
 
         # Temperature inputs
         tk.Label(control_frame, text="외기(°C):").grid(row=0, column=0, sticky="w")
         self.outdoor_temp_entry = tk.Entry(control_frame, width=8)
-        self.outdoor_temp_entry.grid(row=0, column=1, padx=(6,0), pady=2)
+        self.outdoor_temp_entry.grid(row=0, column=1, padx=(6, 0), pady=2)
         self.outdoor_temp_entry.insert(0, "-5.0")
 
         tk.Label(control_frame, text="실내(°C):").grid(row=1, column=0, sticky="w")
         self.indoor_temp_entry = tk.Entry(control_frame, width=8)
-        self.indoor_temp_entry.grid(row=1, column=1, padx=(6,0), pady=2)
+        self.indoor_temp_entry.grid(row=1, column=1, padx=(6, 0), pady=2)
         self.indoor_temp_entry.insert(0, "25.0")
 
         tk.Label(control_frame, text="급기(°C):").grid(row=2, column=0, sticky="w")
         self.supply_temp_entry = tk.Entry(control_frame, width=8)
-        self.supply_temp_entry.grid(row=2, column=1, padx=(6,0), pady=2)
+        self.supply_temp_entry.grid(row=2, column=1, padx=(6, 0), pady=2)
         self.supply_temp_entry.insert(0, "18.0")
 
         # Heat norm/equip with apply buttons and Enter bindings
         tk.Label(control_frame, text="일반 발열량\n(W/m²):").grid(row=3, column=0, sticky="w")
         self.heat_norm_entry = tk.Entry(control_frame, width=8)
-        self.heat_norm_entry.grid(row=3, column=1, padx=(6,0), pady=2)
+        self.heat_norm_entry.grid(row=3, column=1, padx=(6, 0), pady=2)
         self.heat_norm_entry.insert(0, "0.00")
         norm_apply_btn = tk.Button(control_frame, text="적용", width=6, command=lambda: self._on_apply_norm())
-        norm_apply_btn.grid(row=3, column=2, padx=(6,0), pady=2)
+        norm_apply_btn.grid(row=3, column=2, padx=(6, 0), pady=2)
         self.heat_norm_entry.bind("<Return>", lambda e: self._on_apply_norm())
 
         tk.Label(control_frame, text="장비 발열량\n(W/m²):").grid(row=4, column=0, sticky="w")
         self.heat_equip_entry = tk.Entry(control_frame, width=8)
-        self.heat_equip_entry.grid(row=4, column=1, padx=(6,0), pady=2)
+        self.heat_equip_entry.grid(row=4, column=1, padx=(6, 0), pady=2)
         self.heat_equip_entry.insert(0, "0.00")
         equip_apply_btn = tk.Button(control_frame, text="적용", width=6, command=lambda: self._on_apply_equip())
-        equip_apply_btn.grid(row=4, column=2, padx=(6,0), pady=2)
+        equip_apply_btn.grid(row=4, column=2, padx=(6, 0), pady=2)
         self.heat_equip_entry.bind("<Return>", lambda e: self._on_apply_equip())
 
         # 급기 풍량 산정 버튼
         supply_calc_btn = tk.Button(control_frame, text="급기 풍량 산정", width=12,
                                     command=lambda: self._on_calc_supply_flow())
-        supply_calc_btn.grid(row=5, column=0, columnspan=3, pady=(8,2))
+        supply_calc_btn.grid(row=5, column=0, columnspan=3, pady=(8, 2))
 
         # 결과 표시용 텍스트 박스
-        tk.Label(control_frame, text="총 급기 풍량 (m3/hr):").grid(row=6, column=0, columnspan=3, sticky="w", pady=(6,0))
+        tk.Label(control_frame, text="총 급기 풍량 (m3/hr):").grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.supply_result_text = tk.Text(control_frame, height=4, width=24)
-        self.supply_result_text.grid(row=7, column=0, columnspan=3, pady=(2,0))
+        self.supply_result_text.grid(row=7, column=0, columnspan=3, pady=(2, 0))
 
         # --- 디퓨저 관련 UI 추가 ---
-        tk.Label(control_frame, text="디퓨저\n담당면적(m²):").grid(row=8, column=0, sticky="w", pady=(8,2))
+        tk.Label(control_frame, text="디퓨저\n담당면적(m²):").grid(row=8, column=0, sticky="w", pady=(8, 2))
         self.diffuser_area_entry = tk.Entry(control_frame, width=8)
-        self.diffuser_area_entry.grid(row=8, column=1, padx=(6,0), pady=2)
+        self.diffuser_area_entry.grid(row=8, column=1, padx=(6, 0), pady=2)
         self.diffuser_area_entry.insert(0, "10.0")
 
         diffuser_btn = tk.Button(control_frame, text="디퓨저 자동 배치", width=14,
                                  command=lambda: self._on_place_diffusers())
-        diffuser_btn.grid(row=9, column=0, columnspan=3, pady=(4,2))
+        diffuser_btn.grid(row=9, column=0, columnspan=2, pady=(4, 2))
+        # Reset diffusers button next to auto-place
+        reset_btn = tk.Button(control_frame, text="디퓨져 초기화", width=10,
+                              command=lambda: self._on_reset_diffusers())
+        reset_btn.grid(row=9, column=2, pady=(4, 2))
 
         # Diagnostic button: count diffusers inside/outside a room
         check_btn = tk.Button(control_frame, text="디퓨저 점검", width=14,
                               command=lambda: self._on_check_diffusers())
-        check_btn.grid(row=10, column=0, columnspan=3, pady=(2,6))
+        check_btn.grid(row=10, column=0, columnspan=3, pady=(2, 6))
 
-        # top_frame for main toolbar
-        top_frame = tk.Frame(root)
+        # top_frame for remaining main toolbar buttons
+        top_frame = tk.Frame(self.root)
         top_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-
-        tk.Label(top_frame, text="면적 (m²):").pack(side=tk.LEFT)
-        self.area_entry = tk.Entry(top_frame, width=10)
-        self.area_entry.pack(side=tk.LEFT, padx=5)
-
-        draw_btn = tk.Button(top_frame, text="정사각형 그리기", command=self.draw_square_from_area_current)
-        draw_btn.pack(side=tk.LEFT, padx=5)
-
-        self.area_entry.bind("<Return>", lambda e: self.draw_square_from_area_current())
 
         self.area_label_var = tk.StringVar()
         self.area_label_var.set("선택 도형 면적: - m²")
@@ -2280,16 +2298,13 @@ class ResizableRectApp:
         clear_palette_btn = tk.Button(top_frame, text="팔레트 지우기", command=self.clear_current_palette)
         clear_palette_btn.pack(side=tk.LEFT, padx=5)
 
-        auto_btn = tk.Button(top_frame, text="자동생성", command=self.auto_generate_current)
-        auto_btn.pack(side=tk.LEFT, padx=10)
-
         save_btn = tk.Button(top_frame, text="저장하기", command=self.save_current)
         save_btn.pack(side=tk.LEFT, padx=5)
 
         load_btn = tk.Button(top_frame, text="불러오기", command=self.load_current)
         load_btn.pack(side=tk.LEFT, padx=5)
 
-        self.notebook = ttk.Notebook(root)
+        self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         self.palettes = []
@@ -2345,6 +2360,35 @@ class ResizableRectApp:
             messagebox.showerror("입력 오류", "디퓨저 담당면적에 양의 숫자를 입력하세요.")
             return
         rc.auto_place_diffusers(a)
+
+    def _on_reset_diffusers(self):
+        rc = self.get_current_palette()
+        if not rc:
+            messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
+            return
+
+        # delete canvas items tagged as diffusers and diffuser_label in this palette
+        try:
+            for item in list(rc.canvas.find_withtag("diffuser")):
+                try:
+                    rc.canvas.delete(item)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            for item in list(rc.canvas.find_withtag("diffuser_label")):
+                try:
+                    rc.canvas.delete(item)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # clear stored ids
+        for lab in rc.generated_space_labels:
+            lab["diffuser_ids"] = []
+            lab["diffuser_label_ids"] = []
 
     def get_current_palette(self) -> Palette | None:
         if not self.notebook.tabs():
