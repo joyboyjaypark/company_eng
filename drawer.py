@@ -1129,6 +1129,11 @@ class Palette:
         dlg = tk.Toplevel(self.canvas.master)
         dlg.transient(self.canvas.master)
         dlg.title("공간 편집")
+        # make popup wider so controls don't overlap
+        try:
+            dlg.geometry("420x170")
+        except Exception:
+            pass
         tk.Label(dlg, text="공간 이름:").grid(row=0, column=0, padx=6, pady=6)
         name_entry = tk.Entry(dlg, width=30)
         name_entry.grid(row=0, column=1, padx=6, pady=6)
@@ -1144,6 +1149,53 @@ class Palette:
         combo.current(int(cur_hvac) - 1 if cur_hvac in HVAC_NAMES else 0)
         combo.grid(row=1, column=1, padx=6, pady=6)
 
+        # 공조 상세 콤보박스 추가 (will be enabled only when HVAC == 2)
+        tk.Label(dlg, text="공조 상세:").grid(row=2, column=0, padx=6, pady=6)
+        hvac_detail_var = tk.StringVar()
+        detail_combo = ttk.Combobox(dlg, textvariable=hvac_detail_var, state='readonly', width=24)
+        detail_combo['values'] = [
+            "1. PAC(냉방)",
+            "2. PAC(냉난방기)",
+            "3. EHP",
+            "4. 항온항습기",
+        ]
+        # set initial hvac_detail selection if present
+        cur_detail = lab.get("hvac_detail", None)
+        if cur_detail and isinstance(cur_detail, int) and 1 <= cur_detail <= 4:
+            detail_combo.current(cur_detail - 1)
+        else:
+            detail_combo.set("")
+        # enable/disable detail_combo depending on current hvac type
+        try:
+            if int(cur_hvac) == 2:
+                detail_combo.configure(state='readonly')
+                if not cur_detail:
+                    detail_combo.current(0)
+            else:
+                detail_combo.configure(state='disabled')
+        except Exception:
+            detail_combo.configure(state='disabled')
+        detail_combo.grid(row=2, column=1, padx=6, pady=6)
+
+        # when HVAC selection changes, toggle the detail combobox
+        def _on_hvac_change(event=None):
+            sel = combo.get()
+            try:
+                hv = int(sel.split('.')[0])
+            except Exception:
+                hv = 1
+            if hv == 2:
+                detail_combo.configure(state='readonly')
+                # if no previous detail, default to first
+                if not detail_combo.get():
+                    detail_combo.current(0)
+            else:
+                # clear detail selection and disable
+                detail_combo.set("")
+                detail_combo.configure(state='disabled')
+
+        combo.bind("<<ComboboxSelected>>", _on_hvac_change)
+
         def on_ok():
             new_name = name_entry.get().strip()
             if not new_name:
@@ -1154,20 +1206,36 @@ class Palette:
                 num = int(sel.split('.')[0])
             except Exception:
                 num = 1
-            # set name with hvac suffix
+            # detail
+            dsel = detail_combo.get()
+            dnum = 1
+            try:
+                dnum = int(dsel.split('.')[0])
+            except Exception:
+                dnum = 1
+            # set name with hvac suffix and optional detail suffix (only append detail when 개별공조 == 2)
             full = f"{new_name}({num}. {HVAC_NAMES.get(num, '')})"
+            if num == 2 and dsel:
+                # extract detail text after the dot and remove leading space
+                try:
+                    detail_text = dsel.split('.', 1)[1].strip()
+                    full = f"{full}_{dnum}.{detail_text}"
+                except Exception:
+                    pass
+            # persist
             self.push_history()
             self.canvas.itemconfigure(lab["name_id"], text=full)
             lab["hvac_type"] = num
+            lab["hvac_detail"] = dnum
             dlg.destroy()
 
         def on_cancel():
             dlg.destroy()
 
         ok_btn = tk.Button(dlg, text="확인", command=on_ok)
-        ok_btn.grid(row=2, column=0, padx=6, pady=8)
+        ok_btn.grid(row=3, column=0, padx=6, pady=8)
         cancel_btn = tk.Button(dlg, text="취소", command=on_cancel)
-        cancel_btn.grid(row=2, column=1, padx=6, pady=8)
+        cancel_btn.grid(row=3, column=1, padx=6, pady=8)
         name_entry.focus_set()
 
     def on_space_heat_norm_click(self, event):
@@ -2012,7 +2080,8 @@ class Palette:
                 "area_pos": [area_x, area_y],
                 "diffuser_coords": diffuser_coords
                 ,
-                "hvac_type": int(lab.get("hvac_type", 1))
+                "hvac_type": int(lab.get("hvac_type", 1)),
+                "hvac_detail": int(lab.get("hvac_detail", 1))
             })
         # save grid visibility
         data["show_grid"] = bool(getattr(self, 'show_grid', False))
@@ -2087,7 +2156,8 @@ class Palette:
                 "heat_equip_id": heat_equip_id,
                 "area_id": area_id,
                 "diffuser_ids": diffuser_ids,
-                "hvac_type": int(lab.get("hvac_type", 1))
+                "hvac_type": int(lab.get("hvac_type", 1)),
+                "hvac_detail": int(lab.get("hvac_detail", 1))
             })
 
         # 태그 바인딩 복원
