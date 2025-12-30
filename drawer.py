@@ -1391,7 +1391,8 @@ class Palette:
                     "heat_norm_id": heat_norm_id,
                     "heat_equip_id": heat_equip_id,
                     "area_id": area_id,
-                    "diffuser_ids": matched_diffusers # 기존 디퓨저 점 유지
+                    "diffuser_ids": matched_diffusers, # 기존 디퓨저 점 유지
+                    "hvac_type": matched.get('hvac_type', 1) if isinstance(matched, dict) else 1
                 })
                 used_existing.append(matched)
             else:
@@ -1856,18 +1857,28 @@ class Palette:
 
         self.push_history()
 
-        # 기존 디퓨저 삭제
+        # 안전하게 기존의 모든 diffuser 및 diffuser_label 아이템을 삭제
+        try:
+            for item in list(self.canvas.find_withtag("diffuser")):
+                try:
+                    self.canvas.delete(item)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            for item in list(self.canvas.find_withtag("diffuser_label")):
+                try:
+                    self.canvas.delete(item)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 각 lab 내부의 ID 리스트들도 초기화
         for lab in self.generated_space_labels:
-            if "diffuser_ids" in lab:
-                for did in lab["diffuser_ids"]:
-                    if did in self.canvas.find_all():
-                        self.canvas.delete(did)
-                # also delete any diffuser label texts
-                for tid in lab.get("diffuser_label_ids", []):
-                    if tid in self.canvas.find_all():
-                        self.canvas.delete(tid)
-                lab["diffuser_ids"].clear()
-                lab["diffuser_label_ids"] = []
+            lab["diffuser_ids"] = []
+            lab["diffuser_label_ids"] = []
 
         # 각 실별 디퓨저 생성
         for lab in self.generated_space_labels:
@@ -1884,6 +1895,14 @@ class Palette:
             
             if area_val <= 0:
                 lab["diffuser_ids"] = []
+                continue
+
+            # Only place diffusers for central HVAC (1. 중앙공조)
+            hvac = int(lab.get("hvac_type", 1)) if lab.get("hvac_type", None) is not None else 1
+            if hvac != 1:
+                # ensure no diffusers/labels remain for non-central HVAC rooms
+                lab["diffuser_ids"] = []
+                lab["diffuser_label_ids"] = []
                 continue
 
             # 개수 결정 로직: 몫(int) -> 홀수면 +1 (짝수화)
@@ -2173,6 +2192,7 @@ class ResizableRectApp:
         control_frame = tk.Frame(left_panel)
         control_frame.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
+        # Temperature inputs
         tk.Label(control_frame, text="외기(°C):").grid(row=0, column=0, sticky="w")
         self.outdoor_temp_entry = tk.Entry(control_frame, width=8)
         self.outdoor_temp_entry.grid(row=0, column=1, padx=(6,0), pady=2)
@@ -2188,21 +2208,22 @@ class ResizableRectApp:
         self.supply_temp_entry.grid(row=2, column=1, padx=(6,0), pady=2)
         self.supply_temp_entry.insert(0, "18.0")
 
+        # Heat norm/equip with apply buttons and Enter bindings
         tk.Label(control_frame, text="일반 발열량\n(W/m²):").grid(row=3, column=0, sticky="w")
         self.heat_norm_entry = tk.Entry(control_frame, width=8)
         self.heat_norm_entry.grid(row=3, column=1, padx=(6,0), pady=2)
         self.heat_norm_entry.insert(0, "0.00")
-        norm_apply_btn = tk.Button(control_frame, text="적용", width=6,
-                                   command=lambda: self._on_apply_norm())
+        norm_apply_btn = tk.Button(control_frame, text="적용", width=6, command=lambda: self._on_apply_norm())
         norm_apply_btn.grid(row=3, column=2, padx=(6,0), pady=2)
+        self.heat_norm_entry.bind("<Return>", lambda e: self._on_apply_norm())
 
         tk.Label(control_frame, text="장비 발열량\n(W/m²):").grid(row=4, column=0, sticky="w")
         self.heat_equip_entry = tk.Entry(control_frame, width=8)
         self.heat_equip_entry.grid(row=4, column=1, padx=(6,0), pady=2)
         self.heat_equip_entry.insert(0, "0.00")
-        equip_apply_btn = tk.Button(control_frame, text="적용", width=6,
-                                    command=lambda: self._on_apply_equip())
+        equip_apply_btn = tk.Button(control_frame, text="적용", width=6, command=lambda: self._on_apply_equip())
         equip_apply_btn.grid(row=4, column=2, padx=(6,0), pady=2)
+        self.heat_equip_entry.bind("<Return>", lambda e: self._on_apply_equip())
 
         # 급기 풍량 산정 버튼
         supply_calc_btn = tk.Button(control_frame, text="급기 풍량 산정", width=12,
@@ -2213,7 +2234,7 @@ class ResizableRectApp:
         tk.Label(control_frame, text="총 급기 풍량 (m3/hr):").grid(row=6, column=0, columnspan=3, sticky="w", pady=(6,0))
         self.supply_result_text = tk.Text(control_frame, height=4, width=24)
         self.supply_result_text.grid(row=7, column=0, columnspan=3, pady=(2,0))
-        
+
         # --- 디퓨저 관련 UI 추가 ---
         tk.Label(control_frame, text="디퓨저\n담당면적(m²):").grid(row=8, column=0, sticky="w", pady=(8,2))
         self.diffuser_area_entry = tk.Entry(control_frame, width=8)
@@ -2237,8 +2258,7 @@ class ResizableRectApp:
         self.area_entry = tk.Entry(top_frame, width=10)
         self.area_entry.pack(side=tk.LEFT, padx=5)
 
-        draw_btn = tk.Button(top_frame, text="정사각형 그리기",
-                             command=self.draw_square_from_area_current)
+        draw_btn = tk.Button(top_frame, text="정사각형 그리기", command=self.draw_square_from_area_current)
         draw_btn.pack(side=tk.LEFT, padx=5)
 
         self.area_entry.bind("<Return>", lambda e: self.draw_square_from_area_current())
