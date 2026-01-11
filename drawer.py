@@ -7,6 +7,7 @@ import json
 from shapely.geometry import Polygon, LineString, Point
 from shapely.ops import unary_union, polygonize
 import re
+import os
 
 # HVAC type names
 HVAC_NAMES = {
@@ -1119,51 +1120,122 @@ class Palette:
         lab = self._find_space_label_by_item(item_id)
         if not lab:
             return
+        # ensure hvac fields exist so popup initialization can rely on them
+        try:
+            cur_hvac_def = int(lab.get("hvac_type", 1))
+        except Exception:
+            cur_hvac_def = 1
+        if 'hvac_text' not in lab:
+            try:
+                lab['hvac_text'] = f"{cur_hvac_def}. {HVAC_NAMES.get(cur_hvac_def, '')}"
+            except Exception:
+                lab['hvac_text'] = None
+        if 'hvac_detail' not in lab:
+            lab['hvac_detail'] = None
         # current name and hvac
         old = self.canvas.itemcget(lab["name_id"], "text")
-        # extract bare name (remove existing hvac suffix like 'Room 1(1. 중앙공조)')
-        m = re.match(r"^(.*?)(\s*\(\d+\..*\))?$", old)
+        # extract bare name (remove existing hvac suffix like 'Room 1(1. 중앙공조)'
+        # and trailing detail like '_1.PAC(냉방)')
+        m = re.match(r'^(.*?)(?:\s*\(\d+\..*?\))?(?:_\d+\..*)?$', old)
         base_name = m.group(1).strip() if m else old
 
         # popup dialog with entry + combobox
         dlg = tk.Toplevel(self.canvas.master)
         dlg.transient(self.canvas.master)
-        dlg.title("공간 편집")
+        dlg.title("공간편집")
         # make popup wider so controls don't overlap
         try:
-            dlg.geometry("420x170")
+            dlg.geometry("700x420")
         except Exception:
             pass
-        tk.Label(dlg, text="공간 이름:").grid(row=0, column=0, padx=6, pady=6)
+        # Reserve a right-side column for the CSV table so left-side controls keep their positions
+        try:
+            dlg.grid_columnconfigure(0, weight=0)
+            dlg.grid_columnconfigure(1, weight=0)
+            # reserve a fixed min width for the table column so adding the table won't shift left widgets
+            dlg.grid_columnconfigure(2, weight=0, minsize=480)
+        except Exception:
+            pass
+        tk.Label(dlg, text="공간이름:").grid(row=0, column=0, padx=6, pady=6)
         name_entry = tk.Entry(dlg, width=30)
-        name_entry.grid(row=0, column=1, padx=6, pady=6)
+        name_entry.grid(row=0, column=1, padx=6, pady=6, sticky='w')
         name_entry.insert(0, base_name)
 
-        tk.Label(dlg, text="공조 방식:").grid(row=1, column=0, padx=6, pady=6)
+        tk.Label(dlg, text="공조방식:").grid(row=1, column=0, padx=6, pady=6)
         from tkinter import ttk
         hvac_var = tk.StringVar()
-        combo = ttk.Combobox(dlg, textvariable=hvac_var, state='readonly', width=20)
+        # make combobox width match name_entry and align left
+        combo = ttk.Combobox(dlg, textvariable=hvac_var, state='readonly', width=30)
         combo['values'] = [f"{k}. {v}" for k, v in HVAC_NAMES.items()]
-        # current hvac
+        # initialize HVAC combobox display from stored lab values
         cur_hvac = lab.get("hvac_type", 1)
-        combo.current(int(cur_hvac) - 1 if cur_hvac in HVAC_NAMES else 0)
-        combo.grid(row=1, column=1, padx=6, pady=6)
+        hvac_text = lab.get('hvac_text', None)
+        try:
+            vals = list(combo['values'])
+            if hvac_text and hvac_text in vals:
+                combo.current(vals.index(hvac_text))
+                hvac_var.set(hvac_text)
+                # force visible text after the popup is mapped to avoid readonly rendering quirks
+                dlg.after(10, lambda v=hvac_text: combo.set(v))
+            else:
+                # format from numeric hvac_type
+                try:
+                    hv_num = int(cur_hvac)
+                except Exception:
+                    hv_num = 1
+                display = f"{hv_num}. {HVAC_NAMES.get(hv_num, '')}"
+                if display in vals:
+                    combo.current(vals.index(display))
+                else:
+                    combo.current(0)
+                hvac_var.set(display)
+                dlg.after(10, lambda v=display: combo.set(v))
+        except Exception:
+            try:
+                combo.current(0)
+            except Exception:
+                pass
+        combo.grid(row=1, column=1, padx=6, pady=6, sticky='w')
 
         # 공조 상세 콤보박스 추가 (will be enabled only when HVAC == 2)
-        tk.Label(dlg, text="공조 상세:").grid(row=2, column=0, padx=6, pady=6)
+        tk.Label(dlg, text="공조상세:").grid(row=2, column=0, padx=6, pady=6)
         hvac_detail_var = tk.StringVar()
-        detail_combo = ttk.Combobox(dlg, textvariable=hvac_detail_var, state='readonly', width=24)
+        # match width with other controls and align left
+        detail_combo = ttk.Combobox(dlg, textvariable=hvac_detail_var, state='readonly', width=30)
+        # show stripped text (no numeric prefix)
         detail_combo['values'] = [
-            "1. PAC(냉방)",
-            "2. PAC(냉난방기)",
-            "3. EHP",
-            "4. 항온항습기",
+            "PAC(냉방)",
+            "PAC(냉난방)",
+            "EHP",
+            "항온항습기",
         ]
-        # set initial hvac_detail selection if present
+        # set initial hvac_detail selection from stored lab value if any
         cur_detail = lab.get("hvac_detail", None)
-        if cur_detail and isinstance(cur_detail, int) and 1 <= cur_detail <= 4:
-            detail_combo.current(cur_detail - 1)
-        else:
+        try:
+            vals_d = list(detail_combo['values'])
+            if cur_detail is not None and isinstance(cur_detail, int) and 1 <= cur_detail <= len(vals_d):
+                di = int(cur_detail) - 1
+                detail_combo.current(di)
+                try:
+                    dval = vals_d[di]
+                    hvac_detail_var.set(dval)
+                    dlg.after(10, lambda v=dval: detail_combo.set(v))
+                except Exception:
+                    pass
+            else:
+                try:
+                    # stored hvac_detail_text is already stripped (no prefix)
+                    prev = lab.get('hvac_detail_text', None)
+                    if prev and prev in vals_d:
+                        idx = vals_d.index(prev)
+                        detail_combo.current(idx)
+                        hvac_detail_var.set(prev)
+                        dlg.after(10, lambda v=prev: detail_combo.set(v))
+                    else:
+                        detail_combo.set("")
+                except Exception:
+                    detail_combo.set("")
+        except Exception:
             detail_combo.set("")
         # enable/disable detail_combo depending on current hvac type
         try:
@@ -1175,9 +1247,581 @@ class Palette:
                 detail_combo.configure(state='disabled')
         except Exception:
             detail_combo.configure(state='disabled')
-        detail_combo.grid(row=2, column=1, padx=6, pady=6)
+        detail_combo.grid(row=2, column=1, padx=6, pady=6, sticky='w')
 
-        # when HVAC selection changes, toggle the detail combobox
+        # compute and show total heat (kW) beneath the detail combobox
+        total_kw = None
+        try:
+            area_text = self.canvas.itemcget(lab["area_id"], "text")
+            norm_text = self.canvas.itemcget(lab["heat_norm_id"], "text")
+            equip_text = self.canvas.itemcget(lab["heat_equip_id"], "text")
+
+            def _extract_first_float(s: str) -> float:
+                if not s:
+                    return 0.0
+                for tok in s.replace(',', ' ').split():
+                    try:
+                        return float(tok)
+                    except Exception:
+                        continue
+                return 0.0
+
+            # area might be like '100.00 m²' or similar
+            area_val = _extract_first_float(area_text)
+            norm_v = _extract_first_float(norm_text)
+            equip_v = _extract_first_float(equip_text)
+
+            total_kw = area_val * (norm_v + equip_v) / 1000.0
+            heat_label = tk.Label(dlg, text=f"총 발열량: {total_kw:.3f} kW")
+            heat_label.grid(row=3, column=0, columnspan=2, padx=6, pady=(4, 6), sticky='w')
+            status_label = tk.Label(dlg, text="", fg="gray")
+            status_label.grid(row=4, column=0, columnspan=2, padx=6, pady=(0,6), sticky='w')
+            # prepare CSV table/placeholders (will be updated dynamically)
+            csv_shown = None
+            tbl = None
+            csv_msg = None
+            # fix vertical spacing of left-side rows (name, hvac, detail, heat_label)
+            fixed_row_mins = {}
+            try:
+                dlg.update_idletasks()
+                # map rows to widgets we want to lock and record initial heights
+                row_widget_map = {
+                    0: name_entry,
+                    1: combo,
+                    2: detail_combo,
+                    3: heat_label
+                }
+                for r, w in row_widget_map.items():
+                    try:
+                        h = max(18, int(w.winfo_reqheight()) + 6)
+                        fixed_row_mins[r] = h
+                        dlg.grid_rowconfigure(r, minsize=h, weight=0)
+                    except Exception:
+                        try:
+                            dlg.grid_rowconfigure(r, weight=0)
+                        except Exception:
+                            pass
+            except Exception:
+                fixed_row_mins = {}
+
+            # table container on the right (keeps the left controls fixed when table appears/disappears)
+            table_frame = tk.Frame(dlg, bd=0)
+            try:
+                table_frame.grid(row=0, column=2, rowspan=7, padx=6, pady=6, sticky='nsew')
+            except Exception:
+                try:
+                    table_frame.grid(row=0, column=2, rowspan=7, padx=6, pady=6)
+                except Exception:
+                    pass
+
+            # helper to make the Treeview cells (second column) editable inline
+            def make_tree_editable(tv):
+                # tv: Treeview instance
+                def _on_double_click(event):
+                    try:
+                        row_id = tv.identify_row(event.y)
+                        col = tv.identify_column(event.x)
+                        # only allow editing the second column (value)
+                        if not row_id or col != '#2':
+                            return
+                        bbox = tv.bbox(row_id, column=col)
+                        if not bbox:
+                            return
+                        x, y, w, h = bbox
+                        # get current value
+                        vals = list(tv.item(row_id, 'values'))
+                        cur = vals[1] if len(vals) > 1 else ''
+                        # create Entry overlay
+                        entry = tk.Entry(table_frame)
+                        entry.insert(0, cur)
+                        # place relative to treeview widget
+                        # translate bbox x,y to table_frame coordinates
+                        try:
+                            # tv.winfo_rootx/winfo_rooty not used because placing in same parent simplifies
+                            entry.place(x=x, y=y, width=w, height=h)
+                        except Exception:
+                            entry.place(x=x, y=y, width=w, height=h)
+                        entry.focus_set()
+
+                        def _save(e=None):
+                            try:
+                                new = entry.get()
+                                vals2 = list(tv.item(row_id, 'values'))
+                                if len(vals2) < 2:
+                                    # pad
+                                    while len(vals2) < 2:
+                                        vals2.append('')
+                                vals2[1] = new
+                                tv.item(row_id, values=vals2)
+                                # update underlying csv_shown if present (keep sync)
+                                try:
+                                    children = list(tv.get_children())
+                                    idx = children.index(row_id)
+                                    if csv_shown and 'values' in csv_shown and 0 <= idx < len(csv_shown['values']):
+                                        t0 = csv_shown['values'][idx][0] if len(csv_shown['values'][idx]) > 0 else ''
+                                        csv_shown['values'][idx] = (t0, new)
+                                        # If the edited row is the first row (quantity), recompute target and update table column
+                                        if idx == 0:
+                                            try:
+                                                qty = int(float(new)) if new is not None and new != '' else 1
+                                            except Exception:
+                                                try:
+                                                    qty = int(new)
+                                                except Exception:
+                                                    qty = 1
+                                            try:
+                                                # recompute target and choose new column from preferred columns if available
+                                                if total_kw is None:
+                                                    tval = 0.0
+                                                else:
+                                                    tval = float(total_kw) / max(1, qty)
+                                                # find headers matching sel_detail
+                                                sel_detail_local = None
+                                                try:
+                                                    sel_detail_local = detail_combo.get().strip() if detail_combo.get() else None
+                                                except Exception:
+                                                    sel_detail_local = None
+                                                local_rows = getattr(self.app, 'last_csv_rows', None)
+                                                headers_local = local_rows[0] if local_rows else []
+                                                preferred = []
+                                                if sel_detail_local:
+                                                    for ci, h in enumerate(headers_local):
+                                                        try:
+                                                            if sel_detail_local.lower() in str(h).lower():
+                                                                preferred.append(ci)
+                                                        except Exception:
+                                                            continue
+                                                # build candidate list from preferred columns; if none, leave unchanged
+                                                cand = []
+                                                if preferred:
+                                                    for ci in preferred:
+                                                        try:
+                                                            v = float(local_rows[1][ci]) if local_rows and ci < len(local_rows[1]) else None
+                                                            if v is not None:
+                                                                cand.append((ci, v))
+                                                        except Exception:
+                                                            continue
+                                                # select column whose second-row value is > tval and closest
+                                                chosen = None
+                                                if cand:
+                                                    greater_local = [c for c in cand if c[1] > tval]
+                                                    if greater_local:
+                                                        chosen = min(greater_local, key=lambda x: x[1])
+                                                    else:
+                                                        lesser_local = [c for c in cand if c[1] <= tval]
+                                                        if lesser_local:
+                                                            chosen = min(lesser_local, key=lambda x: abs(x[1] - tval))
+                                                # if chosen found, update csv_shown values to that column
+                                                if chosen:
+                                                    nci = chosen[0]
+                                                    try:
+                                                        new_values = [((r[0] if len(r) > 0 else ''), (r[nci] if nci < len(r) else '')) for r in (local_rows if local_rows else [])]
+                                                        csv_shown['col_index'] = nci
+                                                        csv_shown['header'] = headers_local[nci] if nci < len(headers_local) else csv_shown.get('header', '')
+                                                        csv_shown['values'] = new_values
+                                                        # ensure quantity row is first
+                                                        try:
+                                                            csv_shown['values'].insert(0, ("대수(Q'ty)", str(qty)))
+                                                        except Exception:
+                                                            pass
+                                                        # refresh treeview display
+                                                        try:
+                                                            for it in tv.get_children():
+                                                                tv.delete(it)
+                                                            for idx2, (t0, v0) in enumerate(csv_shown['values']):
+                                                                iid2 = tv.insert('', tk.END, values=(t0, v0))
+                                                                if idx2 == 0:
+                                                                    try:
+                                                                        tv.item(iid2, tags=('qty',))
+                                                                    except Exception:
+                                                                        pass
+                                                            try:
+                                                                tv.tag_configure('qty', background='#3399ff', foreground='white')
+                                                            except Exception:
+                                                                pass
+                                                        except Exception:
+                                                            pass
+                                                    except Exception:
+                                                        pass
+                                            except Exception:
+                                                pass
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                            try:
+                                entry.destroy()
+                            except Exception:
+                                pass
+
+                        entry.bind('<Return>', _save)
+                        entry.bind('<FocusOut>', _save)
+                    except Exception:
+                        return
+
+                try:
+                    tv.unbind('<Double-1>')
+                except Exception:
+                    pass
+                tv.bind('<Double-1>', _on_double_click)
+
+            def update_csv_table():
+                nonlocal csv_shown, tbl, total_kw
+                # re-apply fixed row min sizes so left-side vertical spacing does not change
+                try:
+                    for rr, hh in fixed_row_mins.items():
+                        try:
+                            dlg.grid_rowconfigure(rr, minsize=hh, weight=0)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    # CSV is stored on the application object (self.app)
+                    rows = getattr(self.app, 'last_csv_rows', None)
+                    # check current hvac selection (kept for informational use)
+                    try:
+                        cur_sel = combo.get()
+                        hv = int(cur_sel.split('.')[0]) if cur_sel else int(lab.get('hvac_type', 1))
+                    except Exception:
+                        hv = int(lab.get('hvac_type', 1)) if lab.get('hvac_type', None) is not None else 1
+
+                    # If HVAC is not 개별공조(2), do not show CSV-derived table here
+                    try:
+                        if int(hv) != 2:
+                            if tbl is not None:
+                                try:
+                                    tbl.destroy()
+                                except Exception:
+                                    pass
+                                tbl = None
+                            csv_shown = None
+                            # ensure no csv_msg is shown
+                            try:
+                                if csv_msg is not None:
+                                    csv_msg.destroy()
+                            except Exception:
+                                pass
+                            csv_msg = None
+                            return
+                    except Exception:
+                        pass
+
+                    # If CSV rows exist and total_kw is available, proceed
+                    if not rows or total_kw is None or len(rows) < 2:
+                        # no CSV rows or no total: remove table if present
+                        if tbl is not None:
+                            try:
+                                tbl.destroy()
+                            except Exception:
+                                pass
+                            tbl = None
+                        csv_shown = None
+                        # if no CSV loaded, show an instruction
+                        try:
+                            if not rows:
+                                if csv_msg is None:
+                                    csv_msg = tk.Label(dlg, text="CSV가 로드되지 않았습니다. 툴바의 'CSV로드'로 파일을 먼저 불러오세요.", fg="gray")
+                                    csv_msg.grid(row=4, column=0, columnspan=2, padx=6, pady=(2,6), sticky='w')
+                            else:
+                                if csv_msg is not None:
+                                    try:
+                                        csv_msg.destroy()
+                                    except Exception:
+                                        pass
+                                    csv_msg = None
+                        except Exception:
+                            pass
+                        return
+
+                    headers = rows[0]
+                    second = rows[1]
+                    # prefer columns where the CSV first-row header matches the selected 공조상세
+                    try:
+                        # if HVAC is not 개별공조 (2), ignore detail_combo value even if present
+                        if int(hv) != 2:
+                            sel_detail = None
+                        else:
+                            sel_detail = detail_combo.get().strip() if detail_combo.get() else None
+                    except Exception:
+                        sel_detail = None
+
+                    headers = rows[0]
+                    preferred_cols = []
+                    if sel_detail:
+                        for ci, h in enumerate(headers):
+                            try:
+                                if sel_detail.lower() in str(h).lower():
+                                    preferred_cols.append(ci)
+                            except Exception:
+                                continue
+
+                    candidates = []
+                    # if sel_detail provided but no preferred columns found, do not show table
+                    if sel_detail and not preferred_cols:
+                        # No header match: show table with empty values and DO NOT run fallback selection.
+                        try:
+                            first_col_vals = [((r[0] if len(r) > 0 else ''), '') for r in rows]
+                        except Exception:
+                            first_col_vals = []
+                        csv_shown = {
+                            'col_index': None,
+                            'header': sel_detail if sel_detail else '',
+                            'values': first_col_vals
+                        }
+                        # remove any CSV-not-loaded message
+                        try:
+                            if csv_msg is not None:
+                                try:
+                                    csv_msg.destroy()
+                                except Exception:
+                                    pass
+                                csv_msg = None
+                        except Exception:
+                            pass
+                        # create or update treeview immediately with empty values and return
+                        try:
+                            from tkinter import ttk
+                            if tbl is None:
+                                tbl = ttk.Treeview(table_frame, columns=("title", "value"), show='headings', height=15)
+                                first_col_name = rows[0][0] if rows and len(rows) > 0 and len(rows[0]) > 0 else ""
+                                try:
+                                    tbl.heading('title', text=first_col_name)
+                                except Exception:
+                                    tbl.heading('title', text='')
+                                tbl.heading('value', text=csv_shown['header'])
+                                tbl.column('title', width=180, anchor='w')
+                                tbl.column('value', width=300, anchor='w')
+                                try:
+                                    tbl.pack(fill=tk.BOTH, expand=True)
+                                except Exception:
+                                    tbl.grid(row=0, column=0, sticky='nsew')
+                                try:
+                                    make_tree_editable(tbl)
+                                except Exception:
+                                    pass
+                            else:
+                                tbl.heading('value', text=csv_shown['header'])
+                                for it in tbl.get_children():
+                                    tbl.delete(it)
+                            for title, val in csv_shown['values']:
+                                tbl.insert('', tk.END, values=(title, val))
+                            try:
+                                status_label.configure(text=f"CSV 로드: {len(rows)}행, 선택열 없음 (공조상세 일치 없음)")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        return
+
+                    # if we have preferred columns from header matching, only consider them
+                    if preferred_cols:
+                        for ci in preferred_cols:
+                            try:
+                                v = float(second[ci]) if ci < len(second) else None
+                                if v is not None:
+                                    candidates.append((ci, v))
+                            except Exception:
+                                continue
+                    else:
+                        for ci, val in enumerate(second):
+                            try:
+                                v = float(val)
+                                candidates.append((ci, v))
+                            except Exception:
+                                continue
+
+                    if not candidates:
+                        if tbl is not None:
+                            try:
+                                tbl.destroy()
+                            except Exception:
+                                pass
+                            tbl = None
+                        csv_shown = None
+                        return
+
+                    # Special selection when we have preferred columns (header match)
+                    import math
+                    if preferred_cols and sel_detail:
+                        # consider only the candidate values (from preferred columns)
+                        vals_only = [c[1] for c in candidates]
+                        max_val = max(vals_only) if vals_only else 0.0
+                        # Assumptions:
+                        # - If total_kw < max_val -> divide total by 2, use qty=2.
+                        # - If total_kw > max_val -> compute ratio = total_kw / max_val,
+                        #   take qty = ceil(ratio) + 2 (integer), then target = total_kw / qty.
+                        # These are inferred from the user's description.
+                        try:
+                            if total_kw is None:
+                                total_kw = 0.0
+                        except Exception:
+                            total_kw = 0.0
+
+                        if max_val > 0 and total_kw < max_val:
+                            target = total_kw / 2.0
+                            qty = 2
+                        else:
+                            if max_val > 0:
+                                ratio = total_kw / max_val
+                            else:
+                                ratio = total_kw
+                            qty = int(math.ceil(ratio)) + 2
+                            if qty <= 0:
+                                qty = 2
+                            target = total_kw / qty if qty != 0 else total_kw
+
+                        # pick candidate column closest above target, else largest below
+                        greater = [c for c in candidates if c[1] >= target]
+                        if greater:
+                            best = min(greater, key=lambda x: x[1])
+                        else:
+                            lesser = [c for c in candidates if c[1] < target]
+                            if lesser:
+                                best = max(lesser, key=lambda x: x[1])
+                            else:
+                                best = candidates[0]
+                        ci, cv = best
+                        csv_shown = {
+                            'col_index': ci,
+                            'header': headers[ci] if ci < len(headers) else f'C{ci+1}',
+                            # values: tuples of (first-column title, selected-column value) per row
+                            'values': [((r[0] if len(r) > 0 else ''), (r[ci] if ci < len(r) else '')) for r in rows]
+                        }
+                        # prepend quantity row with computed qty
+                        try:
+                            csv_shown['values'].insert(0, ("대수(Q'ty)", str(qty)))
+                        except Exception:
+                            pass
+                    else:
+                        # default selection logic (no header-priority special rules)
+                        greater = [c for c in candidates if c[1] >= total_kw]
+                        if greater:
+                            best = min(greater, key=lambda x: x[1])
+                        else:
+                            lesser = [c for c in candidates if c[1] < total_kw]
+                            if lesser:
+                                best = max(lesser, key=lambda x: x[1])
+                            else:
+                                best = candidates[0]
+                        ci, cv = best
+                        csv_shown = {
+                            'col_index': ci,
+                            'header': headers[ci] if ci < len(headers) else f'C{ci+1}',
+                            # values: tuples of (first-column title, selected-column value) per row
+                            'values': [((r[0] if len(r) > 0 else ''), (r[ci] if ci < len(r) else '')) for r in rows]
+                        }
+                        # If we found preferred columns by header match, prepend a quantity row as before
+                        try:
+                            if preferred_cols:
+                                csv_shown['values'].insert(0, ("대수(Q'ty)", "1"))
+                        except Exception:
+                            pass
+
+                    # create or update treeview
+                    try:
+                        from tkinter import ttk
+                        if tbl is None:
+                            # place Treeview inside reserved table_frame so left controls don't shift
+                            tbl = ttk.Treeview(table_frame, columns=("title", "value"), show='headings', height=15)
+                            # first column shows the row title (CSV first column), second shows selected value
+                            first_col_name = headers[0] if headers and len(headers) > 0 else ""
+                            try:
+                                tbl.heading('title', text=first_col_name)
+                            except Exception:
+                                tbl.heading('title', text='')
+                            tbl.heading('value', text=csv_shown['header'])
+                            tbl.column('title', width=180, anchor='w')
+                            tbl.column('value', width=300, anchor='w')
+                            try:
+                                tbl.pack(fill=tk.BOTH, expand=True)
+                            except Exception:
+                                tbl.grid(row=0, column=0, sticky='nsew')
+                            # make cells editable
+                            try:
+                                make_tree_editable(tbl)
+                            except Exception:
+                                pass
+                        else:
+                            tbl.heading('value', text=csv_shown['header'])
+                            for it in tbl.get_children():
+                                tbl.delete(it)
+
+                        # remove any CSV-not-loaded message
+                        try:
+                            if csv_msg is not None:
+                                try:
+                                    csv_msg.destroy()
+                                except Exception:
+                                    pass
+                                csv_msg = None
+                        except Exception:
+                            pass
+
+                        for idx, (title, val) in enumerate(csv_shown['values']):
+                            iid = tbl.insert('', tk.END, values=(title, val))
+                            # tag the first row (quantity row) to have a blue background
+                            if idx == 0:
+                                try:
+                                    tbl.item(iid, tags=('qty',))
+                                except Exception:
+                                    pass
+                        try:
+                            tbl.tag_configure('qty', background='#3399ff', foreground='white')
+                        except Exception:
+                            pass
+                        # ensure popup width can contain the table
+                        try:
+                            dlg.update_idletasks()
+                            req = table_frame.winfo_reqwidth()
+                            cur_w = dlg.winfo_width()
+                            # reserve ~380px for left controls; expand dlg width if table would be clipped
+                            min_total = req + 380
+                            if cur_w < min_total:
+                                try:
+                                    dlg.geometry(f"{min_total}x{dlg.winfo_height()}")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # update status label if present
+                        try:
+                            status_label.configure(text=f"CSV 로드: {len(rows)}행, 선택열: {csv_shown['header']}")
+                        except Exception:
+                            pass
+                    except Exception:
+                        # ensure no half-created widget remains
+                        try:
+                            if tbl is not None:
+                                tbl.destroy()
+                        except Exception:
+                            pass
+                        tbl = None
+                except Exception:
+                    csv_shown = None
+                    try:
+                        if tbl is not None:
+                            tbl.destroy()
+                    except Exception:
+                        pass
+                    tbl = None
+
+            # schedule initial csv table update after the popup widgets settle
+            try:
+                dlg.after(50, lambda: (update_csv_table()))
+            except Exception:
+                try:
+                    update_csv_table()
+                except Exception:
+                    pass
+        except Exception:
+            # fallback: show nothing if parsing fails
+            heat_label = tk.Label(dlg, text="총 발열량: - kW")
+            heat_label.grid(row=3, column=0, columnspan=2, padx=6, pady=(4, 6), sticky='w')
+            csv_shown = None
+
+    # when HVAC selection changes, toggle the detail combobox
         def _on_hvac_change(event=None):
             sel = combo.get()
             try:
@@ -1193,49 +1837,145 @@ class Palette:
                 # clear detail selection and disable
                 detail_combo.set("")
                 detail_combo.configure(state='disabled')
+            # update CSV table view when HVAC selection changes
+            try:
+                update_csv_table()
+            except Exception:
+                pass
 
         combo.bind("<<ComboboxSelected>>", _on_hvac_change)
+        # also update CSV table when 공조상세 selection changes
+        try:
+            detail_combo.bind("<<ComboboxSelected>>", lambda e: update_csv_table())
+        except Exception:
+            pass
 
         def on_ok():
             new_name = name_entry.get().strip()
             if not new_name:
                 return
             sel = combo.get()
-            num = 1
+            # determine hvac number: prefer parsed combo, fallback to existing lab value
             try:
-                num = int(sel.split('.')[0])
+                if sel:
+                    num = int(sel.split('.')[0])
+                else:
+                    num = int(lab.get('hvac_type', 1))
             except Exception:
-                num = 1
-            # detail
-            dsel = detail_combo.get()
-            dnum = 1
-            try:
-                dnum = int(dsel.split('.')[0])
-            except Exception:
-                dnum = 1
-            # set name with hvac suffix and optional detail suffix (only append detail when 개별공조 == 2)
-            full = f"{new_name}({num}. {HVAC_NAMES.get(num, '')})"
-            if num == 2 and dsel:
-                # extract detail text after the dot and remove leading space
                 try:
-                    detail_text = dsel.split('.', 1)[1].strip()
-                    full = f"{full}_{dnum}.{detail_text}"
+                    num = int(lab.get('hvac_type', 1))
                 except Exception:
-                    pass
-            # persist
+                    num = 1
+            # detail: determine numeric index from combobox (values are stripped text)
+            dsel = detail_combo.get()
+            prev_detail = lab.get('hvac_detail', None)
+            dnum = prev_detail
+            try:
+                if dsel:
+                    vals_d = list(detail_combo['values'])
+                    if dsel in vals_d:
+                        dnum = vals_d.index(dsel) + 1
+                    else:
+                        # fallback: try matching after removing possible 'N. ' prefix from candidates
+                        stripped = [v[3:].strip() if len(v) > 3 and v[1] == '.' else v for v in vals_d]
+                        if dsel in stripped:
+                            dnum = stripped.index(dsel) + 1
+                        else:
+                            dnum = prev_detail
+                else:
+                    dnum = prev_detail
+            except Exception:
+                dnum = prev_detail
+            # persist: do NOT display hvac or detail on palette; only store values in lab
+            full = new_name
             self.push_history()
             self.canvas.itemconfigure(lab["name_id"], text=full)
             lab["hvac_type"] = num
-            lab["hvac_detail"] = dnum
+            # store full display text of the selected HVAC (e.g. '2. 개별공조')
+            try:
+                lab["hvac_text"] = combo.get().strip() if combo.get() else None
+            except Exception:
+                lab["hvac_text"] = None
+            # store hvac_detail numeric and stripped text; clear if hvac != 2
+            try:
+                if int(num) == 2:
+                    if dnum is None:
+                        lab["hvac_detail"] = prev_detail if prev_detail is not None else 1
+                    else:
+                        lab["hvac_detail"] = int(dnum)
+                    # store stripped text (no numeric prefix)
+                    try:
+                        lab["hvac_detail_text"] = detail_combo.get().strip() if detail_combo.get() else lab.get('hvac_detail_text', None)
+                    except Exception:
+                        lab["hvac_detail_text"] = lab.get('hvac_detail_text', None)
+                else:
+                    lab["hvac_detail"] = None
+                    lab["hvac_detail_text"] = None
+            except Exception:
+                lab["hvac_detail"] = None
+                lab["hvac_detail_text"] = None
             dlg.destroy()
 
         def on_cancel():
             dlg.destroy()
 
+        # if csv_shown prepared at popup creation time, place an initial empty table in the reserved frame
+        if csv_shown:
+            try:
+                from tkinter import ttk
+                tbl = ttk.Treeview(table_frame, columns=("title","value"), show='headings', height=15)
+                try:
+                    rows_top = getattr(self.app, 'last_csv_rows', None)
+                    first_col_name = rows_top[0][0] if rows_top and len(rows_top) > 0 and len(rows_top[0]) > 0 else ""
+                except Exception:
+                    first_col_name = ""
+                try:
+                    tbl.heading('title', text=first_col_name)
+                except Exception:
+                    tbl.heading('title', text='')
+                tbl.heading('value', text=csv_shown['header'])
+                tbl.column('title', width=180, anchor='w')
+                tbl.column('value', width=300, anchor='w')
+                for idx, (title, val) in enumerate(csv_shown['values']):
+                    iid = tbl.insert('', tk.END, values=(title, val))
+                    if idx == 0:
+                        try:
+                            tbl.item(iid, tags=('qty',))
+                        except Exception:
+                            pass
+                try:
+                    tbl.pack(fill=tk.BOTH, expand=True)
+                except Exception:
+                    tbl.grid(row=0, column=0, sticky='nsew')
+                # make editable and style first row
+                try:
+                    make_tree_editable(tbl)
+                except Exception:
+                    pass
+                try:
+                    tbl.tag_configure('qty', background='#3399ff', foreground='white')
+                except Exception:
+                    pass
+                # resize dialog if table would be clipped
+                try:
+                    dlg.update_idletasks()
+                    req = table_frame.winfo_reqwidth()
+                    cur_w = dlg.winfo_width()
+                    min_total = req + 380
+                    if cur_w < min_total:
+                        try:
+                            dlg.geometry(f"{min_total}x{dlg.winfo_height()}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            except Exception:
+                csv_shown = None
+
         ok_btn = tk.Button(dlg, text="확인", command=on_ok)
-        ok_btn.grid(row=3, column=0, padx=6, pady=8)
+        ok_btn.grid(row=6, column=0, padx=6, pady=8)
         cancel_btn = tk.Button(dlg, text="취소", command=on_cancel)
-        cancel_btn.grid(row=3, column=1, padx=6, pady=8)
+        cancel_btn.grid(row=6, column=1, padx=6, pady=8)
         name_entry.focus_set()
 
     def on_space_heat_norm_click(self, event):
@@ -1441,15 +2181,15 @@ class Palette:
                 self.canvas.itemconfigure(area_id, text=f"{area_m2:.2f} m²")
                 if matched_room_number is not None:
                     # preserve hvac_type if present in matched
-                    hv = matched.get('hvac_type', 1) if isinstance(matched, dict) else 1
-                    self.canvas.itemconfigure(name_id, text=f"Room {matched_room_number}({hv}. {HVAC_NAMES.get(hv, '')})")
+                    # Do not display hvac on the palette; show only the room number/name
+                    self.canvas.itemconfigure(name_id, text=f"Room {matched_room_number}")
                 else:
                     # if matched_name has hvac in suffix preserve, else leave as-is
                     if '(' in matched_name and ')' in matched_name:
                         self.canvas.itemconfigure(name_id, text=matched_name)
                     else:
-                        hv = matched.get('hvac_type', 1) if isinstance(matched, dict) else 1
-                        self.canvas.itemconfigure(name_id, text=f"{matched_name}({hv}. {HVAC_NAMES.get(hv, '')})")
+                        # preserve matched_name as-is (do not append hvac)
+                        self.canvas.itemconfigure(name_id, text=matched_name)
                 self.canvas.itemconfigure(heat_norm_id, text=matched_norm)
                 self.canvas.itemconfigure(heat_equip_id, text=matched_equip)
 
@@ -1502,7 +2242,8 @@ class Palette:
 
                 # default hvac type = 1 (중앙공조)
                 hvac_type = 1
-                name_text_with_hvac = f"{name_text}({hvac_type}. {HVAC_NAMES.get(hvac_type)})"
+                # display only base name on palette (do not append hvac)
+                name_text_with_hvac = name_text
                 new_labels.append({
                     "polygon": p,
                     "name_id": name_id,
@@ -1510,9 +2251,12 @@ class Palette:
                     "heat_equip_id": heat_equip_id,
                     "area_id": area_id,
                     "diffuser_ids": [],
-                    "hvac_type": hvac_type
+                    "hvac_type": hvac_type,
+                    # ensure hvac_text and hvac_detail are present for later popup uses
+                    "hvac_text": f"{hvac_type}. {HVAC_NAMES.get(hvac_type, '')}",
+                    "hvac_detail": None
                 })
-                # set displayed name including hvac
+                # set displayed name (base name only)
                 self.canvas.itemconfigure(name_id, text=name_text_with_hvac)
 
         # 기존 라벨 중 사용되지 않은 것 삭제
@@ -2081,7 +2825,8 @@ class Palette:
                 "diffuser_coords": diffuser_coords
                 ,
                 "hvac_type": int(lab.get("hvac_type", 1)),
-                "hvac_detail": int(lab.get("hvac_detail", 1))
+                "hvac_detail": int(lab.get("hvac_detail", 1)) if lab.get("hvac_detail", None) is not None else 0,
+                "hvac_text": lab.get("hvac_text", None)
             })
         # save grid visibility
         data["show_grid"] = bool(getattr(self, 'show_grid', False))
@@ -2149,6 +2894,10 @@ class Palette:
                 )
                 diffuser_ids.append(did)
 
+            # hvac_detail stored as 0 when missing; convert back to None
+            stored_detail = lab.get("hvac_detail", 0)
+            if stored_detail == 0:
+                stored_detail = None
             self.generated_space_labels.append({
                 "polygon": poly,
                 "name_id": name_id,
@@ -2157,7 +2906,8 @@ class Palette:
                 "area_id": area_id,
                 "diffuser_ids": diffuser_ids,
                 "hvac_type": int(lab.get("hvac_type", 1)),
-                "hvac_detail": int(lab.get("hvac_detail", 1))
+                "hvac_detail": int(stored_detail) if stored_detail is not None else None,
+                "hvac_text": lab.get("hvac_text", None)
             })
 
         # 태그 바인딩 복원
@@ -2373,6 +3123,11 @@ class ResizableRectApp:
 
         load_btn = tk.Button(top_frame, text="불러오기", command=self.load_current)
         load_btn.pack(side=tk.LEFT, padx=5)
+        # CSV preview/load button: opens a CSV and shows it in a new window as a table
+        csv_btn = tk.Button(top_frame, text="CSV로드 (C)", command=self.load_csv_preview)
+        csv_btn.pack(side=tk.LEFT, padx=5)
+        equip_btn = tk.Button(top_frame, text="장비일람표 추출", command=self.extract_equipment_list)
+        equip_btn.pack(side=tk.LEFT, padx=5)
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -2436,30 +3191,375 @@ class ResizableRectApp:
         if not rc:
             messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
             return
+    
+    def load_csv_preview(self):
+        """Open a CSV file and show its contents in a new window as a simple table.
 
-        # delete canvas items tagged as diffusers and diffuser_label in this palette
+        Uses several encoding fallbacks (utf-8, cp949, latin-1) to handle common CSV encodings.
+        """
+        from tkinter import filedialog
+        import csv
+
+        file_path = filedialog.askopenfilename(title="CSV 파일 선택", filetypes=[("CSV files", "*.csv"), ("All files", "*")])
+        if not file_path:
+            return
+
+        encodings = ["utf-8", "cp949", "latin-1"]
+        rows = []
+        used_enc = None
+        for enc in encodings:
+            try:
+                with open(file_path, 'r', encoding=enc, errors='strict') as f:
+                    reader = csv.reader(f)
+                    rows = [r for r in reader]
+                used_enc = enc
+                break
+            except Exception:
+                # try next encoding
+                continue
+
+        if used_enc is None:
+            # last resort: open with latin-1 permissive
+            try:
+                with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
+                    reader = csv.reader(f)
+                    rows = [r for r in reader]
+                used_enc = 'latin-1'
+            except Exception as e:
+                messagebox.showerror("CSV 로드 오류", f"파일을 읽을 수 없습니다:\n{e}")
+                return
+
+        # create preview window
+        # save loaded CSV on the app for later use by popups
         try:
-            for item in list(rc.canvas.find_withtag("diffuser")):
-                try:
-                    rc.canvas.delete(item)
-                except Exception:
-                    pass
+            self.last_csv_rows = rows
+            self.last_csv_file_path = file_path
+            self.last_csv_encoding = used_enc
         except Exception:
             pass
-        try:
-            for item in list(rc.canvas.find_withtag("diffuser_label")):
+        
+        win = tk.Toplevel(self.root)
+        win.title(f"CSV 미리보기 - {os.path.basename(file_path)} ({used_enc})")
+        win.geometry("800x400")
+
+        from tkinter import ttk
+        tree = ttk.Treeview(win, show='headings')
+
+        # determine column count
+        max_cols = max((len(r) for r in rows), default=0)
+        cols = [f"C{i+1}" for i in range(max_cols)]
+        tree['columns'] = cols
+        for i, c in enumerate(cols):
+            tree.heading(c, text=c)
+            tree.column(c, width=120, anchor='w')
+
+        # insert rows
+        for r in rows:
+            # pad shorter rows
+            row = list(r) + [""] * (max_cols - len(r))
+            tree.insert('', tk.END, values=row)
+
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        # add a simple close button
+        btn = tk.Button(win, text="닫기", command=win.destroy)
+        btn.pack(side=tk.BOTTOM, pady=6)
+ 
+    def extract_equipment_list(self):
+        """Collect per-room displayed values and export to .xlsx (or CSV fallback).
+
+        Uses the currently selected palette (tab). If CSV rows were loaded earlier via
+        'CSV로드', those rows are used to select table values per-room similarly to the
+        popup logic.
+        """
+        rows = getattr(self, 'last_csv_rows', None)
+        if not rows:
+            messagebox.showinfo("장비일람표 없음", "먼저 CSV를 로드하세요 (툴바의 'CSV로드').")
+            return
+
+        rc = self.get_current_palette()
+        if not rc:
+            messagebox.showinfo('장비일람표 없음', '활성화된 팔레트를 선택하세요.')
+            return
+
+        base_header = [
+            "Room Name",
+            "HVAC Type",
+            "HVAC Detail",
+            "Area (m2)",
+            "Norm (W/m2)",
+            "Equip (W/m2)",
+            "Matched CSV Column",
+            "Matched Value",
+        ]
+
+        export_rows = [base_header]
+
+        def _get_text(lab, key):
+            try:
+                return rc.canvas.itemcget(lab[key], 'text')
+            except Exception:
+                return ""
+
+        # helper to extract first numeric token
+        def _extract_num_token(s: str):
+            if not s:
+                return ""
+            for tok in s.replace(',', ' ').split():
                 try:
-                    rc.canvas.delete(item)
+                    float(tok)
+                    return tok
                 except Exception:
-                    pass
-        except Exception:
-            pass
+                    continue
+            return ""
 
-        # clear stored ids
-        for lab in rc.generated_space_labels:
-            lab["diffuser_ids"] = []
-            lab["diffuser_label_ids"] = []
+        # iterate labels from the active palette
+        for lab in getattr(rc, 'generated_space_labels', []):
+            try:
+                name = _get_text(lab, 'name_id')
+                area_text = _get_text(lab, 'area_id')
+                norm_text = _get_text(lab, 'heat_norm_id')
+                equip_text = _get_text(lab, 'heat_equip_id')
 
+                area_val = _extract_num_token(area_text)
+                norm_val = _extract_num_token(norm_text)
+                equip_val = _extract_num_token(equip_text)
+
+                hvac_type = lab.get('hvac_type', '')
+                hvac_detail_text = lab.get('hvac_detail_text', '') or lab.get('hvac_detail', '') or ''
+
+                matched_col = ''
+                matched_val = ''
+                table_rows_for_export = []
+
+                # reproduce popup selection logic minimally
+                try:
+                    rows_local = rows
+                    if rows_local and len(rows_local) >= 2 and str(hvac_type) == '2' and hvac_detail_text:
+                        headers = rows_local[0]
+                        second = rows_local[1]
+                        sel_detail = hvac_detail_text
+
+                        preferred_cols = []
+                        for ci, h in enumerate(headers):
+                            try:
+                                if sel_detail.lower() in str(h).lower():
+                                    preferred_cols.append(ci)
+                            except Exception:
+                                continue
+
+                        candidates = []
+                        if preferred_cols:
+                            for ci in preferred_cols:
+                                try:
+                                    v = float(second[ci]) if ci < len(second) else None
+                                    if v is not None:
+                                        candidates.append((ci, v))
+                                except Exception:
+                                    continue
+                        else:
+                            for ci, val in enumerate(second):
+                                try:
+                                    v = float(val)
+                                    candidates.append((ci, v))
+                                except Exception:
+                                    continue
+
+                        csv_shown_vals = []
+                        if sel_detail and not preferred_cols:
+                            csv_shown_vals = [((r[0] if len(r) > 0 else ''), '') for r in rows_local]
+                        else:
+                            if candidates:
+                                import math
+                                # compute total_kw safely
+                                try:
+                                    total_kw_local = float(area_val) * (float(norm_val) if norm_val else 0.0 + float(equip_val) if equip_val else 0.0) / 1000.0
+                                except Exception:
+                                    total_kw_local = 0.0
+
+                                if preferred_cols and sel_detail:
+                                    vals_only = [c[1] for c in candidates]
+                                    max_val = max(vals_only) if vals_only else 0.0
+                                    if max_val > 0 and total_kw_local < max_val:
+                                        target = total_kw_local / 2.0
+                                        qty = 2
+                                    else:
+                                        if max_val > 0:
+                                            ratio = total_kw_local / max_val
+                                        else:
+                                            ratio = total_kw_local
+                                        qty = int(math.ceil(ratio)) + 2
+                                        if qty <= 0:
+                                            qty = 2
+                                        target = total_kw_local / qty if qty != 0 else total_kw_local
+
+                                    greater = [c for c in candidates if c[1] >= target]
+                                    if greater:
+                                        best = min(greater, key=lambda x: x[1])
+                                    else:
+                                        lesser = [c for c in candidates if c[1] < target]
+                                        if lesser:
+                                            best = max(lesser, key=lambda x: x[1])
+                                        else:
+                                            best = candidates[0]
+                                    ci, cv = best
+                                    matched_col = headers[ci] if ci < len(headers) else f'C{ci+1}'
+                                    csv_shown_vals = [((r[0] if len(r) > 0 else ''), (r[ci] if ci < len(r) else '')) for r in rows_local]
+                                    try:
+                                        csv_shown_vals.insert(0, ("대수(Q'ty)", str(qty)))
+                                    except Exception:
+                                        pass
+                                    for data_row in rows_local[1:]:
+                                        if ci < len(data_row) and data_row[ci] is not None and str(data_row[ci]).strip() != "":
+                                            matched_val = data_row[ci]
+                                            break
+                                else:
+                                    greater = [c for c in candidates if c[1] >= total_kw_local]
+                                    if greater:
+                                        best = min(greater, key=lambda x: x[1])
+                                    else:
+                                        lesser = [c for c in candidates if c[1] < total_kw_local]
+                                        if lesser:
+                                            best = max(lesser, key=lambda x: x[1])
+                                        else:
+                                            best = candidates[0]
+                                    ci, cv = best
+                                    matched_col = headers[ci] if ci < len(headers) else f'C{ci+1}'
+                                    csv_shown_vals = [((r[0] if len(r) > 0 else ''), (r[ci] if ci < len(r) else '')) for r in rows_local]
+                                    for data_row in rows_local[1:]:
+                                        if ci < len(data_row) and data_row[ci] is not None and str(data_row[ci]).strip() != "":
+                                            matched_val = data_row[ci]
+                                            break
+
+                        # prepare table rows list
+                        for t0, v0 in csv_shown_vals:
+                            table_rows_for_export.append((str(t0).strip(), str(v0).strip()))
+                except Exception:
+                    matched_col = ''
+                    matched_val = ''
+                    table_rows_for_export = []
+
+                export_rows.append([
+                    name,
+                    str(hvac_type),
+                    hvac_detail_text,
+                    area_val,
+                    norm_val,
+                    equip_val,
+                    matched_col,
+                    matched_val,
+                    table_rows_for_export
+                ])
+            except Exception:
+                # skip problematic label but continue
+                continue
+
+        # Build final header with Table columns expanded to maximum seen
+        max_table_pairs = 0
+        for r in export_rows[1:]:
+            trows = r[8] if len(r) > 8 else []
+            if trows and isinstance(trows, list):
+                max_table_pairs = max(max_table_pairs, len(trows))
+
+        # If we have only the base header and no room rows, show diagnostics and stop
+        if len(export_rows) <= 1:
+            try:
+                cnt = len(getattr(rc, 'generated_space_labels', []))
+                rows_diag = []
+                for lab in getattr(rc, 'generated_space_labels', []):
+                    try:
+                        keys = list(lab.keys())
+                    except Exception:
+                        keys = []
+                    try:
+                        n = rc.canvas.itemcget(lab.get('name_id', -1), 'text')
+                    except Exception:
+                        n = '<err>'
+                    try:
+                        a = rc.canvas.itemcget(lab.get('area_id', -1), 'text')
+                    except Exception:
+                        a = '<err>'
+                    try:
+                        hv = lab.get('hvac_type', '<no>')
+                    except Exception:
+                        hv = '<err>'
+                    try:
+                        hd = lab.get('hvac_detail_text', lab.get('hvac_detail', ''))
+                    except Exception:
+                        hd = '<err>'
+                    rows_diag.append(f"keys={keys[:10]} name={n!s} area={a!s} hvac={hv!s} detail={hd!s}")
+
+                diag_text = f"내보낼 실별 데이터가 없습니다. 생성된 라벨 수: {cnt}\n\n" + "\n".join(rows_diag[:20])
+                if len(diag_text) > 2500:
+                    diag_text = diag_text[:2500] + "\n..."
+                messagebox.showinfo('데이터 없음 - 진단', diag_text)
+            except Exception:
+                messagebox.showinfo('데이터 없음', '내보낼 실별 데이터가 없습니다. 캔버스의 라벨을 확인하세요.')
+            return
+
+        final_header = base_header[:]
+        for i in range(1, max_table_pairs + 1):
+            final_header.append(f"Table_{i}_Title")
+            final_header.append(f"Table_{i}_Value")
+
+        # Ask user where to save .xlsx
+        from tkinter import filedialog
+        fp = filedialog.asksaveasfilename(parent=self.root, defaultextension='.xlsx', filetypes=[('Excel files', '*.xlsx'), ('All files', '*.*')], title='장비일람표 저장 (.xlsx)')
+        if not fp:
+            return
+
+        # Try to save as .xlsx; fallback to CSV if openpyxl not available
+        try:
+            try:
+                import openpyxl
+                from openpyxl import Workbook
+                openpyxl_path = getattr(openpyxl, '__file__', None)
+            except Exception:
+                # fallback to CSV
+                import csv, sys
+                csv_fp = fp
+                if csv_fp.lower().endswith('.xlsx'):
+                    csv_fp = csv_fp[:-5] + '.csv'
+                # write CSV with BOM so Excel (Windows) recognizes UTF-8 Korean text
+                with open(csv_fp, 'w', newline='', encoding='utf-8-sig') as cf:
+                    writer = csv.writer(cf)
+                    writer.writerow(final_header)
+                    for r in export_rows[1:]:
+                        base = r[:8]
+                        tlist = r[8] if len(r) > 8 else []
+                        row_out = list(base)
+                        for (t0, v0) in tlist:
+                            row_out.append(t0)
+                            row_out.append(v0)
+                        while len(row_out) < len(final_header):
+                            row_out.append("")
+                        writer.writerow(row_out)
+                messagebox.showinfo('저장 완료 (CSV)', f"openpyxl이 없어 CSV로 저장했습니다: {csv_fp}\nPython: {sys.executable}")
+                return
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = '장비일람표'
+            ws.append(final_header)
+            for r in export_rows[1:]:
+                base = r[:8]
+                tlist = r[8] if len(r) > 8 else []
+                row_out = list(base)
+                for (t0, v0) in tlist:
+                    row_out.append(t0)
+                    row_out.append(v0)
+                while len(row_out) < len(final_header):
+                    row_out.append("")
+                ws.append(row_out)
+            wb.save(fp)
+            try:
+                openpyxl_info = openpyxl_path
+            except Exception:
+                openpyxl_info = None
+            messagebox.showinfo('저장 완료', f'장비일람표를 저장했습니다: {fp}\nPython: {sys.executable}\nopenpyxl: {openpyxl_info}')
+        except Exception as e:
+            messagebox.showerror('저장 오류', f'파일 저장 중 오류가 발생했습니다:\n{e}')
+ 
     def get_current_palette(self) -> Palette | None:
         if not self.notebook.tabs():
             return None
@@ -2522,7 +3622,22 @@ class ResizableRectApp:
             return
 
         rc.shapes.clear()
-        rc.canvas.delete("all")
+        # delete all items except those tagged as 'grid' so the grid remains visible
+        try:
+            all_items = list(rc.canvas.find_all())
+            for item in all_items:
+                try:
+                    tags = rc.canvas.gettags(item)
+                    if 'grid' in tags:
+                        continue
+                    rc.canvas.delete(item)
+                except Exception:
+                    continue
+        except Exception:
+            try:
+                rc.canvas.delete("all")
+            except Exception:
+                pass
         rc.generated_space_labels.clear()
         rc.highlight_line_id = None
         rc.tooltip_id = None
