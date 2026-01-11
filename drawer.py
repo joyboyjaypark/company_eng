@@ -1643,6 +1643,13 @@ class Palette:
 
                     # Special selection when we have preferred columns (header match)
                     import math
+                    # if user previously saved a quantity for this lab, prefer it
+                    stored_qty = None
+                    try:
+                        if 'hvac_qty' in lab and lab.get('hvac_qty') is not None:
+                            stored_qty = int(lab.get('hvac_qty'))
+                    except Exception:
+                        stored_qty = None
                     if preferred_cols and sel_detail:
                         # consider only the candidate values (from preferred columns)
                         vals_only = [c[1] for c in candidates]
@@ -1658,18 +1665,23 @@ class Palette:
                         except Exception:
                             total_kw = 0.0
 
-                        if max_val > 0 and total_kw < max_val:
-                            target = total_kw / 2.0
-                            qty = 2
+                        # if stored_qty exists, use it; else compute per original logic
+                        if stored_qty is not None:
+                            qty = stored_qty
+                            target = total_kw / max(1, qty)
                         else:
-                            if max_val > 0:
-                                ratio = total_kw / max_val
-                            else:
-                                ratio = total_kw
-                            qty = int(math.ceil(ratio)) + 2
-                            if qty <= 0:
+                            if max_val > 0 and total_kw < max_val:
+                                target = total_kw / 2.0
                                 qty = 2
-                            target = total_kw / qty if qty != 0 else total_kw
+                            else:
+                                if max_val > 0:
+                                    ratio = total_kw / max_val
+                                else:
+                                    ratio = total_kw
+                                qty = int(math.ceil(ratio)) + 2
+                                if qty <= 0:
+                                    qty = 2
+                                target = total_kw / qty if qty != 0 else total_kw
 
                         # pick candidate column closest above target, else largest below
                         greater = [c for c in candidates if c[1] >= target]
@@ -1690,6 +1702,7 @@ class Palette:
                         }
                         # prepend quantity row with computed qty
                         try:
+                            # if user has a stored qty prefer that display
                             csv_shown['values'].insert(0, ("대수(Q'ty)", str(qty)))
                         except Exception:
                             pass
@@ -1714,7 +1727,14 @@ class Palette:
                         # If we found preferred columns by header match, prepend a quantity row as before
                         try:
                             if preferred_cols:
-                                csv_shown['values'].insert(0, ("대수(Q'ty)", "1"))
+                                try:
+                                    stored_qty2 = int(lab.get('hvac_qty')) if lab.get('hvac_qty') is not None else None
+                                except Exception:
+                                    stored_qty2 = None
+                                if stored_qty2 is not None:
+                                    csv_shown['values'].insert(0, ("대수(Q'ty)", str(stored_qty2)))
+                                else:
+                                    csv_shown['values'].insert(0, ("대수(Q'ty)", "1"))
                         except Exception:
                             pass
 
@@ -1914,6 +1934,22 @@ class Palette:
             except Exception:
                 lab["hvac_detail"] = None
                 lab["hvac_detail_text"] = None
+            # If csv_shown exists and its first row is the quantity row, persist that quantity into the label
+            try:
+                if csv_shown and 'values' in csv_shown and len(csv_shown['values']) > 0:
+                    first_title, first_val = csv_shown['values'][0]
+                    if isinstance(first_title, str) and "대수" in first_title:
+                        try:
+                            qv = int(float(first_val)) if first_val is not None and str(first_val).strip() != '' else None
+                        except Exception:
+                            try:
+                                qv = int(str(first_val))
+                            except Exception:
+                                qv = None
+                        if qv is not None:
+                            lab['hvac_qty'] = qv
+            except Exception:
+                pass
             dlg.destroy()
 
         def on_cancel():
@@ -2826,7 +2862,10 @@ class Palette:
                 ,
                 "hvac_type": int(lab.get("hvac_type", 1)),
                 "hvac_detail": int(lab.get("hvac_detail", 1)) if lab.get("hvac_detail", None) is not None else 0,
-                "hvac_text": lab.get("hvac_text", None)
+                "hvac_text": lab.get("hvac_text", None),
+                # persist edited quantity and detail text if present
+                "hvac_qty": int(lab.get("hvac_qty")) if lab.get("hvac_qty", None) is not None else None,
+                "hvac_detail_text": lab.get("hvac_detail_text", None)
             })
         # save grid visibility
         data["show_grid"] = bool(getattr(self, 'show_grid', False))
@@ -2907,7 +2946,10 @@ class Palette:
                 "diffuser_ids": diffuser_ids,
                 "hvac_type": int(lab.get("hvac_type", 1)),
                 "hvac_detail": int(stored_detail) if stored_detail is not None else None,
-                "hvac_text": lab.get("hvac_text", None)
+                "hvac_text": lab.get("hvac_text", None),
+                # restore persisted quantity and detail text if present
+                "hvac_qty": int(lab.get("hvac_qty")) if lab.get("hvac_qty", None) is not None else None,
+                "hvac_detail_text": lab.get("hvac_detail_text", None)
             })
 
         # 태그 바인딩 복원
@@ -3380,18 +3422,32 @@ class ResizableRectApp:
                                 if preferred_cols and sel_detail:
                                     vals_only = [c[1] for c in candidates]
                                     max_val = max(vals_only) if vals_only else 0.0
-                                    if max_val > 0 and total_kw_local < max_val:
-                                        target = total_kw_local / 2.0
-                                        qty = 2
+
+                                    # If the user previously saved a quantity for this lab, prefer it
+                                    stored_qty = None
+                                    try:
+                                        if 'hvac_qty' in lab and lab.get('hvac_qty') is not None:
+                                            stored_qty = int(lab.get('hvac_qty'))
+                                    except Exception:
+                                        stored_qty = None
+
+                                    # compute qty/target using stored quantity when available
+                                    if stored_qty is not None and stored_qty > 0:
+                                        qty = stored_qty
+                                        target = total_kw_local / max(1, qty)
                                     else:
-                                        if max_val > 0:
-                                            ratio = total_kw_local / max_val
-                                        else:
-                                            ratio = total_kw_local
-                                        qty = int(math.ceil(ratio)) + 2
-                                        if qty <= 0:
+                                        if max_val > 0 and total_kw_local < max_val:
+                                            target = total_kw_local / 2.0
                                             qty = 2
-                                        target = total_kw_local / qty if qty != 0 else total_kw_local
+                                        else:
+                                            if max_val > 0:
+                                                ratio = total_kw_local / max_val
+                                            else:
+                                                ratio = total_kw_local
+                                            qty = int(math.ceil(ratio)) + 2
+                                            if qty <= 0:
+                                                qty = 2
+                                            target = total_kw_local / qty if qty != 0 else total_kw_local
 
                                     greater = [c for c in candidates if c[1] >= target]
                                     if greater:
@@ -3406,6 +3462,7 @@ class ResizableRectApp:
                                     matched_col = headers[ci] if ci < len(headers) else f'C{ci+1}'
                                     csv_shown_vals = [((r[0] if len(r) > 0 else ''), (r[ci] if ci < len(r) else '')) for r in rows_local]
                                     try:
+                                        # ensure displayed quantity reflects stored value if present
                                         csv_shown_vals.insert(0, ("대수(Q'ty)", str(qty)))
                                     except Exception:
                                         pass
@@ -3414,22 +3471,51 @@ class ResizableRectApp:
                                             matched_val = data_row[ci]
                                             break
                                 else:
-                                    greater = [c for c in candidates if c[1] >= total_kw_local]
-                                    if greater:
-                                        best = min(greater, key=lambda x: x[1])
-                                    else:
-                                        lesser = [c for c in candidates if c[1] < total_kw_local]
-                                        if lesser:
-                                            best = max(lesser, key=lambda x: x[1])
-                                        else:
-                                            best = candidates[0]
-                                    ci, cv = best
-                                    matched_col = headers[ci] if ci < len(headers) else f'C{ci+1}'
-                                    csv_shown_vals = [((r[0] if len(r) > 0 else ''), (r[ci] if ci < len(r) else '')) for r in rows_local]
-                                    for data_row in rows_local[1:]:
-                                        if ci < len(data_row) and data_row[ci] is not None and str(data_row[ci]).strip() != "":
-                                            matched_val = data_row[ci]
-                                            break
+                                            # consider stored quantity when available for default selection as well
+                                            stored_qty = None
+                                            try:
+                                                if 'hvac_qty' in lab and lab.get('hvac_qty') is not None:
+                                                    stored_qty = int(lab.get('hvac_qty'))
+                                            except Exception:
+                                                stored_qty = None
+
+                                            if stored_qty is not None and stored_qty > 0:
+                                                # compute target per-unit value and pick candidate closest >= target else closest below
+                                                target = total_kw_local / max(1, stored_qty)
+                                                greater = [c for c in candidates if c[1] >= target]
+                                                if greater:
+                                                    best = min(greater, key=lambda x: x[1])
+                                                else:
+                                                    lesser = [c for c in candidates if c[1] < target]
+                                                    if lesser:
+                                                        best = max(lesser, key=lambda x: abs(x[1] - target))
+                                                    else:
+                                                        best = candidates[0]
+                                            else:
+                                                greater = [c for c in candidates if c[1] >= total_kw_local]
+                                                if greater:
+                                                    best = min(greater, key=lambda x: x[1])
+                                                else:
+                                                    lesser = [c for c in candidates if c[1] < total_kw_local]
+                                                    if lesser:
+                                                        best = max(lesser, key=lambda x: x[1])
+                                                    else:
+                                                        best = candidates[0]
+                                            ci, cv = best
+                                            matched_col = headers[ci] if ci < len(headers) else f'C{ci+1}'
+                                            csv_shown_vals = [((r[0] if len(r) > 0 else ''), (r[ci] if ci < len(r) else '')) for r in rows_local]
+                                            # if stored_qty exists, insert it as the first quantity row so exported table reflects edited qty
+                                            try:
+                                                if stored_qty is not None:
+                                                    csv_shown_vals.insert(0, ("대수(Q'ty)", str(stored_qty)))
+                                                else:
+                                                    csv_shown_vals.insert(0, ("대수(Q'ty)", "1"))
+                                            except Exception:
+                                                pass
+                                            for data_row in rows_local[1:]:
+                                                if ci < len(data_row) and data_row[ci] is not None and str(data_row[ci]).strip() != "":
+                                                    matched_val = data_row[ci]
+                                                    break
 
                         # prepare table rows list
                         for t0, v0 in csv_shown_vals:
