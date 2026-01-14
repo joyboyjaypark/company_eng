@@ -46,6 +46,11 @@ class Palette:
         self.scale = 20.0  # 1m = 20px
         self.unit = "m"
 
+        # rectangle selection state (used when Duct tab active + HVAC selected)
+        self.rect_select_start = None
+        self.rect_select_id = None
+        self.selected_points = set()
+
         # 변 드래그
         self.active_shape = None
         self.active_side_name = None
@@ -779,6 +784,88 @@ class Palette:
             self.set_active_shape(self.moving_shape)
             return
 
+        # If the Duct tab is active and an HVAC entry is selected, allow selection actions
+        try:
+            current_widget = None
+            try:
+                current_widget = self.app.left_notebook.nametowidget(self.app.left_notebook.select())
+            except Exception:
+                current_widget = None
+            if current_widget is getattr(self.app, 'duct_tab', None):
+                # HVAC list exists and has a selection?
+                if getattr(self.app, 'hvac_listbox', None) and self.app.hvac_listbox.curselection():
+                    # If Ctrl is held, toggle (invert) single diffuser under the cursor
+                    try:
+                        ctrl_pressed = bool(event.state & 0x0004)
+                    except Exception:
+                        ctrl_pressed = False
+                    if ctrl_pressed:
+                        # find items near the cursor and toggle the first diffuser-like item
+                        try:
+                            nearby = list(self.canvas.find_overlapping(event.x-3, event.y-3, event.x+3, event.y+3))
+                        except Exception:
+                            nearby = []
+                        toggled = False
+                        for iid in nearby:
+                            try:
+                                if self._is_diffuser_item(iid):
+                                    if iid in self.selected_points:
+                                        # deselect
+                                        try:
+                                            self.canvas.itemconfigure(iid, outline='')
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self.selected_points.remove(iid)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        # select
+                                        try:
+                                            self.canvas.itemconfigure(iid, outline='red')
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self.selected_points.add(iid)
+                                        except Exception:
+                                            pass
+                                    # update app label if present
+                                    try:
+                                        if getattr(self.app, 'duct_selected_label_var', None) is not None:
+                                            self.app.duct_selected_label_var.set(f"선택 디퓨저: {len(self.selected_points)}")
+                                    except Exception:
+                                        pass
+                                    toggled = True
+                                    break
+                            except Exception:
+                                # ignore errors checking this candidate
+                                pass
+                        if toggled:
+                            return
+                    # otherwise begin rect select
+                    self.rect_select_start = (event.x, event.y)
+                    # remember whether ctrl was held for this rect operation
+                    try:
+                        self.rect_select_ctrl = bool(ctrl_pressed)
+                    except Exception:
+                        self.rect_select_ctrl = False
+                    if self.rect_select_id and self.rect_select_id in self.canvas.find_all():
+                        try:
+                            self.canvas.delete(self.rect_select_id)
+                        except Exception:
+                            pass
+                    self.rect_select_id = self.canvas.create_rectangle(event.x, event.y, event.x, event.y,
+                                                                        outline='blue', dash=(3, 2), tags=('rect_select',))
+                    # clear any previous point selection only if not doing ctrl-modify
+                    try:
+                        if not getattr(self, 'rect_select_ctrl', False):
+                            self._clear_point_selection()
+                    except Exception:
+                        pass
+                    return
+        except Exception:
+            pass
+
         shape, side = self.find_side_under_mouse(event.x, event.y, tol=5)
         if shape and side and shape.editable:
             self.push_history()
@@ -788,6 +875,19 @@ class Palette:
             self.drag_start_coords = shape.coords
 
     def on_left_drag(self, event):
+        # If we're doing a rectangle selection (Duct tab + HVAC selected), update the rect and return
+        try:
+            if getattr(self, 'rect_select_start', None):
+                x0, y0 = self.rect_select_start
+                # update rectangle outline
+                if self.rect_select_id and self.rect_select_id in self.canvas.find_all():
+                    try:
+                        self.canvas.coords(self.rect_select_id, x0, y0, event.x, event.y)
+                    except Exception:
+                        pass
+                return
+        except Exception:
+            pass
         # 도형 전체 이동
         if self.moving_shape and self.move_start_mouse_pos and self.move_start_shape_coords:
             dx = event.x - self.move_start_mouse_pos[0]
@@ -818,6 +918,30 @@ class Palette:
             self.highlight_edge_snap(self.moving_shape, snapped_sides)
             self.app.update_selected_area_label(self)
             return
+
+        def _is_diffuser_item(self, iid):
+            """Return True if the canvas item id looks like a diffuser (oval) by checking
+            tag 'point' or membership in generated_space_labels.diffuser_ids."""
+            try:
+                if not iid:
+                    return False
+                # check tag
+                try:
+                    tags = self.canvas.gettags(iid)
+                    if 'point' in tags:
+                        return True
+                except Exception:
+                    pass
+                # check generated_space_labels
+                try:
+                    for lab in getattr(self, 'generated_space_labels', []):
+                        if 'diffuser_ids' in lab and iid in lab['diffuser_ids']:
+                            return True
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return False
 
         # 변 드래그
         if not self.active_shape or not self.active_side_name or not self.drag_start_coords:
@@ -869,6 +993,7 @@ class Palette:
         self.app.update_selected_area_label(self)
 
     def on_left_up(self, event):
+        """Handle left mouse button release: finish moves/drags and finalize rect selection."""
         if self.moving_shape:
             self.clear_edge_snap_highlight(self.moving_shape)
         self.moving_shape = None
@@ -881,6 +1006,136 @@ class Palette:
         self.drag_start_mouse_pos = None
         self.drag_start_coords = None
         self.hide_length_tooltip()
+
+        # finalize rectangle selection if active
+        try:
+            if getattr(self, 'rect_select_start', None):
+                x0, y0 = self.rect_select_start
+                x1, y1 = event.x, event.y
+                if self.rect_select_id and self.rect_select_id in self.canvas.find_all():
+                    try:
+                        self.canvas.delete(self.rect_select_id)
+                    except Exception:
+                        pass
+                self.rect_select_id = None
+                self.rect_select_start = None
+                # select ovals inside the rectangle
+                try:
+                    minx = min(x0, x1)
+                    miny = min(y0, y1)
+                    maxx = max(x0, x1)
+                    maxy = max(y0, y1)
+                    mode = 'invert' if getattr(self, 'rect_select_ctrl', False) else 'replace'
+                    # clear the stored ctrl flag for next operation
+                    try:
+                        self.rect_select_ctrl = False
+                    except Exception:
+                        pass
+                    self._select_points_in_rect(minx, miny, maxx, maxy, mode=mode)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _select_points_in_rect(self, minx, miny, maxx, maxy, mode='replace'):
+        """Select small point-like items (ovals) whose centers fall inside the rectangle.
+
+        mode: 'replace' (default) will clear existing selection and set new selection.
+              'invert' will invert selection state for items inside the rect.
+        """
+        try:
+            # Collect candidate items from two sources:
+            # 1) canvas items tagged 'point' (if diffusers were created with that tag)
+            # 2) diffuser IDs tracked in generated_space_labels (if available)
+            items_set = set()
+            try:
+                for iid in self.canvas.find_withtag('point'):
+                    items_set.add(iid)
+            except Exception:
+                pass
+            # include diffuser ids tracked on generated labels
+            try:
+                for lab in getattr(self, 'generated_space_labels', []):
+                    for did in lab.get('diffuser_ids', []) or []:
+                        try:
+                            items_set.add(int(did))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            items = list(items_set)
+            # If replace mode, start with a fresh selection. If invert, toggle membership.
+            if mode == 'replace':
+                current_selected = set()
+            else:
+                current_selected = set(self.selected_points)
+
+            for iid in items:
+                coords = self.canvas.coords(iid)
+                if not coords or len(coords) < 4:
+                    continue
+                cx = (coords[0] + coords[2]) / 2
+                cy = (coords[1] + coords[3]) / 2
+                if minx <= cx <= maxx and miny <= cy <= maxy:
+                    if mode == 'invert':
+                        # toggle
+                        if iid in current_selected:
+                            try:
+                                current_selected.remove(iid)
+                            except Exception:
+                                pass
+                            try:
+                                self.canvas.itemconfigure(iid, outline='')
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                current_selected.add(iid)
+                            except Exception:
+                                pass
+                            try:
+                                self.canvas.itemconfigure(iid, outline='red')
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            current_selected.add(iid)
+                        except Exception:
+                            pass
+                        # visually mark selection (outline)
+                        try:
+                            self.canvas.itemconfigure(iid, outline='red')
+                        except Exception:
+                            pass
+            # finalize selection set
+            try:
+                self.selected_points = set(current_selected)
+            except Exception:
+                pass
+            # update app label if available
+            try:
+                if getattr(self.app, 'duct_selected_label_var', None) is not None:
+                    self.app.duct_selected_label_var.set(f"선택 디퓨저: {len(self.selected_points)}")
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"select_points_in_rect error: {e}")
+
+    def _clear_point_selection(self):
+        try:
+            for iid in list(self.selected_points):
+                try:
+                    self.canvas.itemconfigure(iid, outline='')
+                except Exception:
+                    pass
+            self.selected_points.clear()
+            try:
+                if getattr(self.app, 'duct_selected_label_var', None) is not None:
+                    self.app.duct_selected_label_var.set("선택 디퓨저: 0")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     # -------- 스냅 --------
 
@@ -3074,7 +3329,7 @@ class ResizableRectApp:
         # rename button with validation
         duct_rename_btn = tk.Button(duct_rename_frame, text="이름 변경", command=self._rename_duct_tab)
         duct_rename_btn.pack(side=tk.LEFT, padx=(2, 4))
-        # restore default name button
+
         def _restore_default():
             self.duct_tab_name_entry.delete(0, tk.END)
             self.duct_tab_name_entry.insert(0, "Duct")
@@ -3117,6 +3372,12 @@ class ResizableRectApp:
         add_btn.pack(side=tk.LEFT, padx=(0, 6))
         apply_btn = tk.Button(hvac_ctrl, text="적용", command=lambda: self._apply_hvac())
         apply_btn.pack(side=tk.LEFT)
+
+        # label showing number of selected diffusers (updated by Palette)
+        self.duct_selected_label_var = tk.StringVar()
+        self.duct_selected_label_var.set("선택 디퓨저: 0")
+        sel_label = tk.Label(self.duct_tab, textvariable=self.duct_selected_label_var, anchor='w')
+        sel_label.pack(fill=tk.X, padx=6, pady=(4, 2))
 
         # area controls at top of Room Design
         area_ctrl = tk.Frame(tab_frame)
@@ -3347,8 +3608,67 @@ class ResizableRectApp:
                 messagebox.showinfo("선택 필요", "적용할 시스템을 선택하세요.")
                 return
             name = self.hvac_listbox.get(sel[0])
-            # placeholder: show a message; integrate with actual logic as needed
-            messagebox.showinfo("적용", f"선택된 시스템: {name}")
+            # compute distinct diffuser "kinds" among currently selected diffusers
+            rc = self.get_current_palette()
+            sel_count = 0
+            kinds = set()
+            if rc is not None:
+                sel_points = getattr(rc, 'selected_points', set()) or set()
+                sel_count = len(sel_points)
+                for iid in sel_points:
+                    try:
+                        tags = tuple(rc.canvas.gettags(iid))
+                    except Exception:
+                        tags = ()
+                    kind = None
+                    # explicit per-item type tag: 'diffuser_type:NAME'
+                    for t in tags:
+                        if isinstance(t, str) and t.startswith('diffuser_type:'):
+                            kind = t.split(':', 1)[1]
+                            break
+                    # common tags: 'supply' / 'return'
+                    if not kind:
+                        if 'supply' in tags:
+                            kind = 'supply'
+                        elif 'return' in tags:
+                            kind = 'return'
+                    # fallback to fill color
+                    if not kind:
+                        try:
+                            fill = rc.canvas.itemcget(iid, 'fill')
+                            if fill:
+                                kind = f'color:{fill}'
+                        except Exception:
+                            pass
+                    if not kind:
+                        kind = 'unknown'
+                    kinds.add(kind)
+
+            # show basic confirmation and update Duct tab label with counts
+            try:
+                messagebox.showinfo("적용", f"선택된 시스템: {name}")
+            except Exception:
+                pass
+
+            types_count = len(kinds)
+            types_list = ", ".join(sorted(kinds)) if kinds else "없음"
+            try:
+                self.duct_selected_label_var.set(f"선택 디퓨저: {sel_count} | 종류 수: {types_count} ({types_list})")
+            except Exception:
+                # fallback: nothing to do
+                pass
+            # Offer the user to assign one main point per kind interactively
+            try:
+                if types_count > 0:
+                    if messagebox.askyesno("메인 포인트 지정", f"{types_count}개의 종류가 감지되었습니다. 각 종류별 메인 포인트를 지정하시겠습니까?"):
+                        kinds_ordered = sorted(kinds)
+                        # start interactive assignment on the current palette
+                        try:
+                            self._start_main_point_assignment(rc, kinds_ordered)
+                        except Exception as e:
+                            messagebox.showerror("오류", f"메인 포인트 지정 중 오류: {e}")
+            except Exception:
+                pass
         except Exception as e:
             messagebox.showerror("오류", f"적용 중 오류: {e}")
 
@@ -3389,6 +3709,145 @@ class ResizableRectApp:
         if not rc:
             messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
             return
+
+    def _start_main_point_assignment(self, rc, kinds_ordered):
+        """Interactively ask the user to click one main diffuser point per kind.
+
+        rc: Palette instance
+        kinds_ordered: list of kind strings to assign
+        """
+        if rc is None:
+            return
+
+        canvas = rc.canvas
+        assigned = {}
+
+        info_txt = (
+            "이제 메인 포인트를 지정합니다.\n"
+            "각 창에 표시되는 안내에 따라 해당 종류의 대표 디퓨저를 캔버스에서 클릭하세요.\n"
+            "취소하려면 ESC 키를 누르세요."
+        )
+        messagebox.showinfo("메인 포인트 안내", info_txt)
+
+        state = {
+            'kinds': kinds_ordered,
+            'index': 0,
+            'assigned': assigned,
+            'orig_bind_click': None,
+            'orig_bind_key': None,
+        }
+
+        def finish_assignment(success=True):
+            # restore bindings
+            try:
+                canvas.unbind('<Button-1>')
+            except Exception:
+                pass
+            try:
+                canvas.unbind('<Key>')
+            except Exception:
+                pass
+            try:
+                canvas.configure(cursor='')
+            except Exception:
+                pass
+            # focus back to root
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+
+        def on_key(event):
+            # ESC to cancel
+            if event.keysym == 'Escape':
+                messagebox.showinfo('취소', '메인 포인트 지정을 취소합니다.')
+                finish_assignment(False)
+
+        def on_click(event):
+            idx = state['index']
+            if idx >= len(state['kinds']):
+                finish_assignment(True)
+                return
+            kind = state['kinds'][idx]
+            # Create a NEW main point snapped to the nearest grid intersection
+            try:
+                # convert event to canvas/world coordinates
+                wx = canvas.canvasx(event.x)
+                wy = canvas.canvasy(event.y)
+                import math
+                # compute spacing and anchor similar to draw_grid
+                spacing = max(1.0, rc.meter_to_pixel(0.5))
+                try:
+                    if rc.shapes:
+                        anchor_x = float(rc.shapes[0].coords[0])
+                        anchor_y = float(rc.shapes[0].coords[1])
+                    else:
+                        anchor_x = 0.0
+                        anchor_y = 0.0
+                except Exception:
+                    anchor_x = 0.0
+                    anchor_y = 0.0
+                rem_x = anchor_x - math.floor(anchor_x / spacing) * spacing
+                rem_y = anchor_y - math.floor(anchor_y / spacing) * spacing
+                kx = int(round((wx - rem_x) / spacing))
+                ky = int(round((wy - rem_y) / spacing))
+                cx = kx * spacing + rem_x
+                cy = ky * spacing + rem_y
+
+                # create a small oval point at snapped coords; match existing diffuser pixel size when possible
+                try:
+                    radius = 3
+                    # prefer to match an existing diffuser's current pixel radius (accounts for zoom/scale)
+                    try:
+                        existing = list(canvas.find_withtag('diffuser'))
+                        if existing:
+                            # use first diffuser's bbox to derive radius
+                            c = canvas.coords(existing[0])
+                            if c and len(c) >= 4:
+                                radius = abs((c[2] - c[0]) / 2.0)
+                    except Exception:
+                        radius = 3
+                except Exception:
+                    radius = 3
+                iid_new = canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
+                                             fill='red', outline='', tags=('diffuser','main_point', f'diffuser_type:{kind}'))
+                # create label next to it
+                try:
+                    tid = canvas.create_text(cx + 8, cy, text=kind, anchor=tk.W, fill='black', font=('Arial', 8, 'bold'))
+                    try:
+                        canvas.addtag_withtag(f'diffuser_type:{kind}', tid)
+                    except Exception:
+                        pass
+                except Exception:
+                    tid = None
+                # record assignment
+                state['assigned'][kind] = {'iid': iid_new, 'label_id': tid, 'orig_fill': None}
+            except Exception as e:
+                messagebox.showerror('오류', f'메인 포인트 생성 중 오류: {e}')
+                finish_assignment(False)
+                return
+
+            state['index'] += 1
+            if state['index'] >= len(state['kinds']):
+                messagebox.showinfo('완료', '모든 종류의 메인 포인트가 지정되었습니다.')
+                finish_assignment(True)
+                return
+            else:
+                # prompt next kind
+                next_kind = state['kinds'][state['index']]
+                messagebox.showinfo('다음 지정', f'다음 종류: {next_kind} 를 클릭하세요.')
+
+        # prepare canvas to receive clicks
+        try:
+            canvas.focus_set()
+            canvas.bind('<Button-1>', lambda e: on_click(e))
+            canvas.bind('<Key>', lambda e: on_key(e))
+            canvas.configure(cursor='crosshair')
+            # initial prompt for first kind
+            if state['kinds']:
+                messagebox.showinfo('지시', f'첫번째 종류: {state["kinds"][0]} 를 클릭하세요.')
+        except Exception as e:
+            messagebox.showerror('오류', f'메인 포인트 입력 준비 중 오류: {e}')
     
     def load_csv_preview(self):
         """Open a CSV file and show its contents in a new window as a simple table.
