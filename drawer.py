@@ -3047,18 +3047,34 @@ class ResizableRectApp:
     def __init__(self, root):
         self.root = root
         self.root.title("도형 편집기 (디퓨저 배치 기능 추가됨)")
-
         # left-side control panel (wider so controls are not clipped)
         left_panel = tk.Frame(self.root, width=280)
         left_panel.pack(side=tk.LEFT, fill=tk.Y)
         left_panel.pack_propagate(False)
 
-        # Room Design labeled frame
-        room_frame = ttk.LabelFrame(left_panel, text="Room Design")
-        room_frame.pack(fill=tk.BOTH, expand=False, padx=6, pady=6)
+        # Left-side notebook hosting Room Design as a tab
+        self.left_notebook = ttk.Notebook(left_panel)
+        self.left_notebook.pack(fill=tk.BOTH, expand=False, padx=6, pady=6)
+
+        # Room Design tab/frame inside left_notebook
+        tab_frame = tk.Frame(self.left_notebook)
+        self.left_notebook.add(tab_frame, text="Room Design")
+
+        # Duct Design tab with simple runtime rename controls
+        self.duct_tab = tk.Frame(self.left_notebook)
+        self.left_notebook.add(self.duct_tab, text="Duct Design")
+
+        duct_rename_frame = tk.Frame(self.duct_tab)
+        duct_rename_frame.pack(side=tk.TOP, fill=tk.X, pady=(4, 4), padx=6)
+        tk.Label(duct_rename_frame, text="탭 이름:").pack(side=tk.LEFT)
+        self.duct_tab_name_entry = tk.Entry(duct_rename_frame, width=14)
+        self.duct_tab_name_entry.insert(0, "Duct Design")
+        self.duct_tab_name_entry.pack(side=tk.LEFT, padx=(4, 6))
+        duct_rename_btn = tk.Button(duct_rename_frame, text="이름 변경", command=self._rename_duct_tab)
+        duct_rename_btn.pack(side=tk.LEFT)
 
         # area controls at top of Room Design
-        area_ctrl = tk.Frame(room_frame)
+        area_ctrl = tk.Frame(tab_frame)
         area_ctrl.pack(side=tk.TOP, fill=tk.X, pady=(2, 4))
         tk.Label(area_ctrl, text="면적 (m²):").pack(side=tk.LEFT)
         self.area_entry = tk.Entry(area_ctrl, width=10)
@@ -3067,14 +3083,14 @@ class ResizableRectApp:
         draw_btn.pack(side=tk.LEFT, padx=5)
         self.area_entry.bind("<Return>", lambda e: self.draw_square_from_area_current())
 
-        # small top area in the room frame to host the Auto-generate button above the inputs
-        top_ctrl = tk.Frame(room_frame)
+        # small top area in the room tab to host the Auto-generate button above the inputs
+        top_ctrl = tk.Frame(tab_frame)
         top_ctrl.pack(side=tk.TOP, pady=(6, 4))
         ag_btn = tk.Button(top_ctrl, text="자동생성", width=18, command=self.auto_generate_current)
         ag_btn.pack()
 
         # control area inside Room Design
-        control_frame = tk.Frame(room_frame)
+        control_frame = tk.Frame(tab_frame)
         control_frame.pack(fill=tk.BOTH, expand=False, padx=8, pady=4)
 
         # Temperature inputs
@@ -3112,7 +3128,7 @@ class ResizableRectApp:
 
         # 급기 풍량 산정 버튼
         supply_calc_btn = tk.Button(control_frame, text="급기 풍량 산정", width=12,
-                                    command=lambda: self._on_calc_supply_flow())
+            command=lambda: self._on_calc_supply_flow())
         supply_calc_btn.grid(row=5, column=0, columnspan=3, pady=(8, 2))
 
         # 결과 표시용 텍스트 박스
@@ -3127,16 +3143,16 @@ class ResizableRectApp:
         self.diffuser_area_entry.insert(0, "10.0")
 
         diffuser_btn = tk.Button(control_frame, text="디퓨저 자동 배치", width=14,
-                                 command=lambda: self._on_place_diffusers())
+                 command=lambda: self._on_place_diffusers())
         diffuser_btn.grid(row=9, column=0, columnspan=2, pady=(4, 2))
         # Reset diffusers button next to auto-place
         reset_btn = tk.Button(control_frame, text="디퓨져 초기화", width=10,
-                              command=lambda: self._on_reset_diffusers())
+                  command=lambda: self._on_reset_diffusers())
         reset_btn.grid(row=9, column=2, pady=(4, 2))
 
         # Diagnostic button: count diffusers inside/outside a room
         check_btn = tk.Button(control_frame, text="디퓨저 점검", width=14,
-                              command=lambda: self._on_check_diffusers())
+                  command=lambda: self._on_check_diffusers())
         check_btn.grid(row=10, column=0, columnspan=3, pady=(2, 6))
 
         # top_frame for remaining main toolbar buttons
@@ -3227,6 +3243,28 @@ class ResizableRectApp:
             messagebox.showerror("입력 오류", "디퓨저 담당면적에 양의 숫자를 입력하세요.")
             return
         rc.auto_place_diffusers(a)
+
+    def _rename_duct_tab(self):
+        """Rename the Duct tab at runtime using the entry value."""
+        try:
+            new_name = self.duct_tab_name_entry.get().strip()
+            if not new_name:
+                messagebox.showinfo("입력 필요", "새 탭 이름을 입력하세요.")
+                return
+            # find index of the duct tab and set its text
+            idx = None
+            try:
+                idx = self.left_notebook.index(self.duct_tab)
+            except Exception:
+                # fallback: search by widget
+                for i in range(self.left_notebook.index("end")):
+                    if self.left_notebook.nametowidget(self.left_notebook.tabs()[i]) is self.duct_tab:
+                        idx = i
+                        break
+            if idx is not None:
+                self.left_notebook.tab(idx, text=new_name)
+        except Exception as e:
+            messagebox.showerror("오류", f"탭 이름 변경 중 오류: {e}")
 
     def _on_reset_diffusers(self):
         rc = self.get_current_palette()
