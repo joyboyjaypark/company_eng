@@ -3047,6 +3047,7 @@ class ResizableRectApp:
     def __init__(self, root):
         self.root = root
         self.root.title("도형 편집기 (디퓨저 배치 기능 추가됨)")
+
         # left-side control panel (wider so controls are not clipped)
         left_panel = tk.Frame(self.root, width=280)
         left_panel.pack(side=tk.LEFT, fill=tk.Y)
@@ -3062,16 +3063,60 @@ class ResizableRectApp:
 
         # Duct Design tab with simple runtime rename controls
         self.duct_tab = tk.Frame(self.left_notebook)
-        self.left_notebook.add(self.duct_tab, text="Duct Design")
+        self.left_notebook.add(self.duct_tab, text="Duct")
 
         duct_rename_frame = tk.Frame(self.duct_tab)
         duct_rename_frame.pack(side=tk.TOP, fill=tk.X, pady=(4, 4), padx=6)
         tk.Label(duct_rename_frame, text="탭 이름:").pack(side=tk.LEFT)
         self.duct_tab_name_entry = tk.Entry(duct_rename_frame, width=14)
-        self.duct_tab_name_entry.insert(0, "Duct Design")
+        self.duct_tab_name_entry.insert(0, "Duct")
         self.duct_tab_name_entry.pack(side=tk.LEFT, padx=(4, 6))
+        # rename button with validation
         duct_rename_btn = tk.Button(duct_rename_frame, text="이름 변경", command=self._rename_duct_tab)
-        duct_rename_btn.pack(side=tk.LEFT)
+        duct_rename_btn.pack(side=tk.LEFT, padx=(2, 4))
+        # restore default name button
+        def _restore_default():
+            self.duct_tab_name_entry.delete(0, tk.END)
+            self.duct_tab_name_entry.insert(0, "Duct")
+            try:
+                idx = self.left_notebook.index(self.duct_tab)
+                self.left_notebook.tab(idx, text="Duct")
+            except Exception:
+                pass
+
+        restore_btn = tk.Button(duct_rename_frame, text="기본 복원", command=_restore_default)
+        restore_btn.pack(side=tk.LEFT)
+
+        # HVAC systems list for Duct tab
+        hvac_frame = tk.Frame(self.duct_tab)
+        hvac_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=6, pady=(6, 4))
+        tk.Label(hvac_frame, text="공조 시스템 목록:").pack(anchor='w')
+        listbox_frame = tk.Frame(hvac_frame)
+        listbox_frame.pack(fill=tk.BOTH, expand=False)
+        self.hvac_listbox = tk.Listbox(listbox_frame, height=6)
+        self.hvac_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.hvac_scroll = tk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=self.hvac_listbox.yview)
+        self.hvac_scroll.pack(side=tk.LEFT, fill=tk.Y)
+        self.hvac_listbox.config(yscrollcommand=self.hvac_scroll.set)
+        # right-click popup menu for deleting an HVAC item
+        self._hvac_menu = tk.Menu(self.hvac_listbox, tearoff=0)
+        self._hvac_menu.add_command(label="삭제", command=self._delete_selected_hvac)
+        # platform-independent right-click binding
+        self.hvac_listbox.bind("<Button-3>", self._on_hvac_right_click)
+        # sample entries
+        for item in ["AHU-1", "AHU-2", "FCU-1", "VAV-1"]:
+            self.hvac_listbox.insert(tk.END, item)
+
+        # controls: entry + add + apply
+        hvac_ctrl = tk.Frame(hvac_frame)
+        hvac_ctrl.pack(fill=tk.X, pady=(6, 2))
+        tk.Label(hvac_ctrl, text="새 시스템:").pack(side=tk.LEFT)
+        self.hvac_new_entry = tk.Entry(hvac_ctrl, width=16)
+        self.hvac_new_entry.pack(side=tk.LEFT, padx=(4, 6))
+        add_btn = tk.Button(hvac_ctrl, text="추가", command=lambda: self._add_hvac())
+        add_btn.pack(side=tk.LEFT, padx=(0, 6))
+        apply_btn = tk.Button(hvac_ctrl, text="적용", command=lambda: self._apply_hvac())
+        apply_btn.pack(side=tk.LEFT)
 
         # area controls at top of Room Design
         area_ctrl = tk.Frame(tab_frame)
@@ -3247,10 +3292,15 @@ class ResizableRectApp:
     def _rename_duct_tab(self):
         """Rename the Duct tab at runtime using the entry value."""
         try:
-            new_name = self.duct_tab_name_entry.get().strip()
+            new_name = (self.duct_tab_name_entry.get() or "").strip()
             if not new_name:
                 messagebox.showinfo("입력 필요", "새 탭 이름을 입력하세요.")
                 return
+            # enforce a reasonable max length
+            max_len = 20
+            if len(new_name) > max_len:
+                new_name = new_name[:max_len]
+                messagebox.showinfo("이름 잘림", f"탭 이름은 {max_len}자 이하로 잘립니다.")
             # find index of the duct tab and set its text
             idx = None
             try:
@@ -3263,8 +3313,76 @@ class ResizableRectApp:
                         break
             if idx is not None:
                 self.left_notebook.tab(idx, text=new_name)
+                # update entry to normalized name (in case trimming occurred)
+                try:
+                    self.duct_tab_name_entry.delete(0, tk.END)
+                    self.duct_tab_name_entry.insert(0, new_name)
+                except Exception:
+                    pass
         except Exception as e:
             messagebox.showerror("오류", f"탭 이름 변경 중 오류: {e}")
+
+    def _add_hvac(self):
+        """Add new HVAC system from the entry into the listbox."""
+        try:
+            name = (self.hvac_new_entry.get() or "").strip()
+            if not name:
+                messagebox.showinfo("입력 필요", "추가할 시스템 이름을 입력하세요.")
+                return
+            # prevent duplicates
+            existing = self.hvac_listbox.get(0, tk.END)
+            if name in existing:
+                messagebox.showinfo("중복", "이미 존재하는 시스템입니다.")
+                return
+            self.hvac_listbox.insert(tk.END, name)
+            self.hvac_new_entry.delete(0, tk.END)
+        except Exception as e:
+            messagebox.showerror("오류", f"시스템 추가 중 오류: {e}")
+
+    def _apply_hvac(self):
+        """Apply the selected HVAC system (placeholder action)."""
+        try:
+            sel = self.hvac_listbox.curselection()
+            if not sel:
+                messagebox.showinfo("선택 필요", "적용할 시스템을 선택하세요.")
+                return
+            name = self.hvac_listbox.get(sel[0])
+            # placeholder: show a message; integrate with actual logic as needed
+            messagebox.showinfo("적용", f"선택된 시스템: {name}")
+        except Exception as e:
+            messagebox.showerror("오류", f"적용 중 오류: {e}")
+
+    def _on_hvac_right_click(self, event):
+        """Show a small popup menu to delete the item under the cursor."""
+        try:
+            # index of item under pointer
+            idx = self.hvac_listbox.nearest(event.y)
+            if idx is None:
+                return
+            # select the item so user sees which will be affected
+            self.hvac_listbox.selection_clear(0, tk.END)
+            self.hvac_listbox.selection_set(idx)
+            # popup the menu at the pointer location
+            try:
+                self._hvac_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self._hvac_menu.grab_release()
+        except Exception as e:
+            # silent fail with optional debug
+            print(f"HVAC right-click menu error: {e}")
+
+    def _delete_selected_hvac(self):
+        """Delete the currently selected HVAC item after user confirmation."""
+        try:
+            sel = self.hvac_listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            name = self.hvac_listbox.get(idx)
+            if messagebox.askyesno("삭제 확인", f"'{name}' 항목을 삭제하시겠습니까?"):
+                self.hvac_listbox.delete(idx)
+        except Exception as e:
+            messagebox.showerror("오류", f"삭제 중 오류: {e}")
 
     def _on_reset_diffusers(self):
         rc = self.get_current_palette()
