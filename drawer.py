@@ -792,8 +792,14 @@ class Palette:
             except Exception:
                 current_widget = None
             if current_widget is getattr(self.app, 'duct_tab', None):
-                # HVAC list exists and has a selection?
-                if getattr(self.app, 'hvac_listbox', None) and self.app.hvac_listbox.curselection():
+                # DEBUG: show hvac selection state for troubleshooting
+                try:
+                    print(f"DEBUG on_left_down: current_widget={current_widget}, hvac_curselection={getattr(self.app, 'hvac_listbox', None) and bool(self.app.hvac_listbox.curselection())}, _active_hvac_name={getattr(self.app, '_active_hvac_name', None)}")
+                except Exception:
+                    pass
+                # HVAC list exists and an HVAC is currently active (selected)
+                if getattr(self.app, 'hvac_listbox', None) and (
+                        bool(self.app.hvac_listbox.curselection()) or getattr(self.app, '_active_hvac_name', None)):
                     # If Ctrl is held, toggle (invert) single diffuser under the cursor
                     try:
                         ctrl_pressed = bool(event.state & 0x0004)
@@ -843,6 +849,10 @@ class Palette:
                         if toggled:
                             return
                     # otherwise begin rect select
+                        try:
+                            print(f"DEBUG on_left_down: begin rect select at ({event.x},{event.y}), ctrl={self.rect_select_ctrl}")
+                        except Exception:
+                            pass
                     self.rect_select_start = (event.x, event.y)
                     # remember whether ctrl was held for this rect operation
                     try:
@@ -856,6 +866,10 @@ class Palette:
                             pass
                     self.rect_select_id = self.canvas.create_rectangle(event.x, event.y, event.x, event.y,
                                                                         outline='blue', dash=(3, 2), tags=('rect_select',))
+                    try:
+                        print(f"DEBUG on_left_down: rect_select_id={self.rect_select_id}")
+                    except Exception:
+                        pass
                     # clear any previous point selection only if not doing ctrl-modify
                     try:
                         if not getattr(self, 'rect_select_ctrl', False):
@@ -1026,12 +1040,20 @@ class Palette:
                     maxx = max(x0, x1)
                     maxy = max(y0, y1)
                     mode = 'invert' if getattr(self, 'rect_select_ctrl', False) else 'replace'
+                    try:
+                        print(f"DEBUG on_left_up: rect ({minx},{miny})-({maxx},{maxy}) mode={mode}")
+                    except Exception:
+                        pass
                     # clear the stored ctrl flag for next operation
                     try:
                         self.rect_select_ctrl = False
                     except Exception:
                         pass
                     self._select_points_in_rect(minx, miny, maxx, maxy, mode=mode)
+                    try:
+                        print(f"DEBUG on_left_up: selection_count={len(getattr(self, 'selected_points', set()))}")
+                    except Exception:
+                        pass
                 except Exception:
                     pass
         except Exception:
@@ -3350,6 +3372,12 @@ class ResizableRectApp:
         listbox_frame.pack(fill=tk.BOTH, expand=False)
         self.hvac_listbox = tk.Listbox(listbox_frame, height=6)
         self.hvac_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # currently active hvac name (set when listbox selection changes)
+        self._active_hvac_name = None
+        # mapping from hvac name -> set of canvas item ids (points and diffusers)
+        self.hvac_map = {}
+        # currently highlighted ids for HVAC selection
+        self._hvac_highlighted = set()
         self.hvac_scroll = tk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=self.hvac_listbox.yview)
         self.hvac_scroll.pack(side=tk.LEFT, fill=tk.Y)
         self.hvac_listbox.config(yscrollcommand=self.hvac_scroll.set)
@@ -3358,6 +3386,8 @@ class ResizableRectApp:
         self._hvac_menu.add_command(label="삭제", command=self._delete_selected_hvac)
         # platform-independent right-click binding
         self.hvac_listbox.bind("<Button-3>", self._on_hvac_right_click)
+        # when a hvac is selected in the listbox, highlight related items
+        self.hvac_listbox.bind('<<ListboxSelect>>', lambda e: self._on_hvac_select())
         # sample entries
         for item in ["AHU-1", "AHU-2", "FCU-1", "VAV-1"]:
             self.hvac_listbox.insert(tk.END, item)
@@ -3596,6 +3626,19 @@ class ResizableRectApp:
                 messagebox.showinfo("중복", "이미 존재하는 시스템입니다.")
                 return
             self.hvac_listbox.insert(tk.END, name)
+            # auto-select the newly added item so it's active immediately
+            try:
+                last_idx = self.hvac_listbox.size() - 1
+                self.hvac_listbox.selection_clear(0, tk.END)
+                self.hvac_listbox.selection_set(last_idx)
+                self._active_hvac_name = name
+                # trigger selection handling to highlight/reset palette selection
+                try:
+                    self._on_hvac_select()
+                except Exception:
+                    pass
+            except Exception:
+                pass
             self.hvac_new_entry.delete(0, tk.END)
         except Exception as e:
             messagebox.showerror("오류", f"시스템 추가 중 오류: {e}")
@@ -3664,7 +3707,7 @@ class ResizableRectApp:
                         kinds_ordered = sorted(kinds)
                         # start interactive assignment on the current palette
                         try:
-                            self._start_main_point_assignment(rc, kinds_ordered)
+                            self._start_main_point_assignment(rc, kinds_ordered, name)
                         except Exception as e:
                             messagebox.showerror("오류", f"메인 포인트 지정 중 오류: {e}")
             except Exception:
@@ -3704,13 +3747,139 @@ class ResizableRectApp:
         except Exception as e:
             messagebox.showerror("오류", f"삭제 중 오류: {e}")
 
+    def _on_hvac_select(self):
+        """Highlight items related to the currently selected HVAC in the active palette."""
+        try:
+            sel = self.hvac_listbox.curselection()
+            if not sel:
+                return
+            name = self.hvac_listbox.get(sel[0])
+            try:
+                print(f"DEBUG _on_hvac_select: selected_name={name}")
+            except Exception:
+                pass
+            # track active hvac name for robust checks in mouse handlers
+            try:
+                self._active_hvac_name = name
+            except Exception:
+                self._active_hvac_name = None
+            rc = self.get_current_palette()
+            if not rc:
+                return
+            # clear previous highlights for this palette
+            try:
+                for iid in list(getattr(self, '_hvac_highlighted', set())):
+                    try:
+                        # only clear items that still exist on this canvas
+                        if iid in rc.canvas.find_all():
+                            rc.canvas.itemconfigure(iid, outline='')
+                    except Exception:
+                        pass
+                self._hvac_highlighted.clear()
+            except Exception:
+                pass
+            # Clear any existing point selection in the palette
+            try:
+                if hasattr(rc, '_clear_point_selection'):
+                    rc._clear_point_selection()
+                else:
+                    # attempt to clear outlines and selected_points
+                    try:
+                        for sid in list(getattr(rc, 'selected_points', set())):
+                            try:
+                                rc.canvas.itemconfigure(sid, outline='')
+                            except Exception:
+                                pass
+                        rc.selected_points = set()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # fetch mapping (stored as {'palette': rc_obj, 'ids': set(...)})
+            mapping = self.hvac_map.get(name)
+            try:
+                print(f"DEBUG _on_hvac_select: mapping_exists={bool(mapping)} mapping={mapping}")
+            except Exception:
+                pass
+            mapped_for_palette = []
+            if mapping and isinstance(mapping, dict):
+                try:
+                    mapped_palette = mapping.get('palette')
+                    ids = mapping.get('ids', set())
+                    # only restore if the recorded palette is the same instance as current
+                    if mapped_palette is rc:
+                        mapped_for_palette = list(ids)
+                except Exception:
+                    mapped_for_palette = []
+            if not mapped_for_palette:
+                # nothing mapped: ensure label shows zero
+                try:
+                    if getattr(self, 'duct_selected_label_var', None) is not None:
+                        self.duct_selected_label_var.set("선택 디퓨저: 0")
+                except Exception:
+                    pass
+                try:
+                    print(f"DEBUG _on_hvac_select: no mapped items for {name}; cleared selection on palette")
+                except Exception:
+                    pass
+                try:
+                    # Force focus to the canvas so that a user clicking/dragging
+                    # on the palette immediately after selecting an HVAC will
+                    # deliver mouse events to the canvas.
+                    try:
+                        rc.canvas.focus_force()
+                    except Exception:
+                        try:
+                            rc.canvas.focus_set()
+                        except Exception:
+                            pass
+                    # schedule a short delayed focus in case the UI focus is
+                    # still settling after the listbox selection event.
+                    try:
+                        self.root.after(50, lambda: rc.canvas.focus_set())
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                return
+
+            # apply new highlights and selection set
+            for iid in mapped_for_palette:
+                try:
+                    if iid in rc.canvas.find_all():
+                        rc.canvas.itemconfigure(iid, outline='red')
+                        try:
+                            rc.selected_points.add(iid)
+                        except Exception:
+                            rc.selected_points = set([iid])
+                        self._hvac_highlighted.add(iid)
+                except Exception:
+                    pass
+            # update selection count label
+            try:
+                if getattr(self, 'duct_selected_label_var', None) is not None:
+                    self.duct_selected_label_var.set(f"선택 디퓨저: {len(getattr(rc, 'selected_points', set()))}")
+            except Exception:
+                pass
+            try:
+                print(f"DEBUG _on_hvac_select: restored {len(getattr(rc, 'selected_points', set()))} items for {name}")
+            except Exception:
+                pass
+            try:
+                rc.canvas.focus_set()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _on_reset_diffusers(self):
         rc = self.get_current_palette()
         if not rc:
             messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
             return
 
-    def _start_main_point_assignment(self, rc, kinds_ordered):
+    def _start_main_point_assignment(self, rc, kinds_ordered, hvac_name=None):
         """Interactively ask the user to click one main diffuser point per kind.
 
         rc: Palette instance
@@ -3754,6 +3923,51 @@ class ResizableRectApp:
             # focus back to root
             try:
                 self.root.focus_force()
+            except Exception:
+                pass
+            # if assignment succeeded and hvac_name provided, record mapping
+            try:
+                if success and hvac_name:
+                    # store mapping associated with this exact Palette instance so
+                    # re-selecting works even if palette ordering changed
+                    ids = set()
+                    for kind, info in state.get('assigned', {}).items():
+                        iid = info.get('iid')
+                        labid = info.get('label_id')
+                        if iid:
+                            try:
+                                ids.add(int(iid))
+                            except Exception:
+                                pass
+                        if labid:
+                            try:
+                                ids.add(int(labid))
+                            except Exception:
+                                pass
+                        # include any other canvas items that have the same diffuser_type tag
+                        try:
+                            for extra in canvas.find_withtag(f'diffuser_type:{kind}'):
+                                try:
+                                    ids.add(int(extra))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    # also include any currently selected diffuser ids in the palette
+                    try:
+                        sel_pts = getattr(rc, 'selected_points', set()) or set()
+                        for sp in list(sel_pts):
+                            try:
+                                ids.add(int(sp))
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    # store mapping with palette reference
+                    try:
+                        self.hvac_map[hvac_name] = {'palette': rc, 'ids': ids}
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
