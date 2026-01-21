@@ -49,6 +49,12 @@ class Palette:
         # rectangle selection state (used when Duct tab active + HVAC selected)
         self.rect_select_start = None
         self.rect_select_id = None
+        # which canvas the current rect_select_id was created on (Canvas object)
+        self.rect_draw_canvas = None
+        # whether the rect was drawn on the total-overlay (Toplevel) canvas
+        self.rect_draw_total = False
+        # whether a rectangle selection is currently active
+        self.rect_selecting = False
         self.selected_points = set()
 
         # 변 드래그
@@ -128,6 +134,134 @@ class Palette:
         try:
             # 초기 레이아웃 후 그리드를 한 번 그립니다
             self.canvas.after(50, self.draw_grid)
+        except Exception:
+            pass
+
+        # Overlay canvas for transient UI (rubber-band rectangle, etc.)
+        try:
+            # create an overlay canvas that sits above the main canvas
+            self.overlay = tk.Canvas(parent, bg='', highlightthickness=0)
+            # place overlay to exactly overlap the main canvas
+            try:
+                self.overlay.place(in_=self.canvas, relx=0, rely=0, relwidth=1, relheight=1)
+                try:
+                    # ensure overlay is above the main canvas
+                    self.overlay.lift(self.canvas)
+                except Exception:
+                    try:
+                        self.overlay.lift()
+                    except Exception:
+                        pass
+            except Exception:
+                # fallback to regular place if in_ placement unsupported
+                try:
+                    self.overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+                    try:
+                        self.overlay.lift(self.canvas)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            # fallback to using main canvas if overlay creation fails
+            self.overlay = self.canvas
+
+        # Total-overlay Toplevel (used if user requests a system-level overlay)
+        self.total_overlay_toplevel = None
+        self.total_overlay_canvas = None
+        self.total_overlay_rect_id = None
+        self.use_total_overlay = False
+        # Force overlay visible for debugging (set True while we debug)
+        self._force_visible_overlay = True
+        # Auto-enable total overlay for immediate visual debugging of rubber-band
+        try:
+            self.enable_total_overlay(True)
+        except Exception:
+            pass
+
+    def _to_overlay_coords(self, event):
+        try:
+            cx = self.canvas.winfo_rootx()
+            cy = self.canvas.winfo_rooty()
+            return (event.x_root - cx, event.y_root - cy)
+        except Exception:
+            return (event.x, event.y)
+
+    def _drawing_canvas(self):
+        """Return the canvas object to draw transient UI on.
+
+        If total overlay is enabled and available, return that canvas with
+        coordinates in screen-relative space; otherwise return the in-app overlay.
+        """
+        # For visibility and reliability, draw on the main canvas by default.
+        # The overlay machinery exists but some platforms/window managers
+        # don't reliably show an overlaid Toplevel; drawing directly on
+        # the main canvas is the most portable and visible approach.
+        return self.canvas, False
+
+    def _create_total_overlay(self):
+        """Create a top-level transparent overlay exactly over the main canvas."""
+        if getattr(self, 'total_overlay_toplevel', None):
+            return
+        try:
+            root = self.canvas.winfo_toplevel()
+            x = self.canvas.winfo_rootx()
+            y = self.canvas.winfo_rooty()
+            w = max(1, self.canvas.winfo_width())
+            h = max(1, self.canvas.winfo_height())
+            top = tk.Toplevel(root)
+            top.overrideredirect(True)
+            try:
+                top.wm_attributes("-topmost", True)
+            except Exception:
+                pass
+            # Position and size to match the canvas on screen
+            try:
+                top.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception:
+                try:
+                    top.geometry(f"{w}x{h}")
+                except Exception:
+                    pass
+            # Use a transparent background color for Windows
+            try:
+                top.wm_attributes("-transparentcolor", "#ff00ff")
+                overlay_bg = '#ff00ff'
+            except Exception:
+                overlay_bg = ''
+
+            # If forcing visible overlay for debug, use a visible background
+            if getattr(self, '_force_visible_overlay', False):
+                overlay_bg = 'lightgrey'
+
+            canvas = tk.Canvas(top, bg=overlay_bg or '', highlightthickness=0)
+            canvas.pack(fill=tk.BOTH, expand=True)
+            self.total_overlay_toplevel = top
+            self.total_overlay_canvas = canvas
+        except Exception:
+            self.total_overlay_toplevel = None
+            self.total_overlay_canvas = None
+
+    def enable_total_overlay(self, enable: bool = True):
+        """Enable or disable the total overlay. When enabled, the rubber-band rectangle
+        will be drawn on a top-level transparent window above the application.
+        """
+        self.use_total_overlay = bool(enable)
+        if self.use_total_overlay:
+            self._create_total_overlay()
+        else:
+            self._destroy_total_overlay()
+
+    def _destroy_total_overlay(self):
+        try:
+            if getattr(self, 'total_overlay_toplevel', None):
+                try:
+                    self.total_overlay_toplevel.destroy()
+                except Exception:
+                    pass
+            self.total_overlay_toplevel = None
+            self.total_overlay_canvas = None
+            self.total_overlay_rect_id = None
         except Exception:
             pass
 
@@ -776,133 +910,302 @@ class Palette:
             self.highlight_side(s, side)
 
     def on_left_down(self, event):
+        try:
+            print(f"DEBUG on_left_down ENTRY at ({event.x},{event.y}) widget={event.widget} state=0x{getattr(event, 'state', 0):04x}")
+        except Exception:
+            pass
+
+        try:
+            try:
+                current_widget = self.app.left_notebook.nametowidget(self.app.left_notebook.select())
+            except Exception:
+                current_widget = None
+            is_duct_dbg = (current_widget is getattr(self.app, 'duct_tab', None))
+            try:
+                print(f"DEBUG on_left_down: notebook_tab={current_widget} is_duct={is_duct_dbg} hvac_active={bool(getattr(self.app, '_active_hvac_name', None))}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # corner handle move takes precedence
         if self.corner_hover_shape is not None:
-            self.push_history()
+            try:
+                self.push_history()
+            except Exception:
+                pass
             self.moving_shape = self.corner_hover_shape
             self.move_start_mouse_pos = (event.x, event.y)
             self.move_start_shape_coords = self.moving_shape.coords
             self.set_active_shape(self.moving_shape)
             return
 
-        # If the Duct tab is active and an HVAC entry is selected, allow selection actions
+        # decide whether we are in Duct (HVAC) mode
         try:
-            current_widget = None
             try:
                 current_widget = self.app.left_notebook.nametowidget(self.app.left_notebook.select())
             except Exception:
                 current_widget = None
-            if current_widget is getattr(self.app, 'duct_tab', None):
-                # DEBUG: show hvac selection state for troubleshooting
-                try:
-                    print(f"DEBUG on_left_down: current_widget={current_widget}, hvac_curselection={getattr(self.app, 'hvac_listbox', None) and bool(self.app.hvac_listbox.curselection())}, _active_hvac_name={getattr(self.app, '_active_hvac_name', None)}")
-                except Exception:
-                    pass
-                # HVAC list exists and an HVAC is currently active (selected)
-                if getattr(self.app, 'hvac_listbox', None) and (
-                        bool(self.app.hvac_listbox.curselection()) or getattr(self.app, '_active_hvac_name', None)):
-                    # If Ctrl is held, toggle (invert) single diffuser under the cursor
-                    try:
-                        ctrl_pressed = bool(event.state & 0x0004)
-                    except Exception:
-                        ctrl_pressed = False
-                    if ctrl_pressed:
-                        # find items near the cursor and toggle the first diffuser-like item
-                        try:
-                            nearby = list(self.canvas.find_overlapping(event.x-3, event.y-3, event.x+3, event.y+3))
-                        except Exception:
-                            nearby = []
-                        toggled = False
-                        for iid in nearby:
-                            try:
-                                if self._is_diffuser_item(iid):
-                                    if iid in self.selected_points:
-                                        # deselect
-                                        try:
-                                            self.canvas.itemconfigure(iid, outline='')
-                                        except Exception:
-                                            pass
-                                        try:
-                                            self.selected_points.remove(iid)
-                                        except Exception:
-                                            pass
-                                    else:
-                                        # select
-                                        try:
-                                            self.canvas.itemconfigure(iid, outline='red')
-                                        except Exception:
-                                            pass
-                                        try:
-                                            self.selected_points.add(iid)
-                                        except Exception:
-                                            pass
-                                    # update app label if present
-                                    try:
-                                        if getattr(self.app, 'duct_selected_label_var', None) is not None:
-                                            self.app.duct_selected_label_var.set(f"선택 디퓨저: {len(self.selected_points)}")
-                                    except Exception:
-                                        pass
-                                    toggled = True
-                                    break
-                            except Exception:
-                                # ignore errors checking this candidate
-                                pass
-                        if toggled:
-                            return
-                    # otherwise begin rect select
-                        try:
-                            print(f"DEBUG on_left_down: begin rect select at ({event.x},{event.y}), ctrl={self.rect_select_ctrl}")
-                        except Exception:
-                            pass
-                    self.rect_select_start = (event.x, event.y)
-                    # remember whether ctrl was held for this rect operation
-                    try:
-                        self.rect_select_ctrl = bool(ctrl_pressed)
-                    except Exception:
-                        self.rect_select_ctrl = False
-                    if self.rect_select_id and self.rect_select_id in self.canvas.find_all():
-                        try:
-                            self.canvas.delete(self.rect_select_id)
-                        except Exception:
-                            pass
-                    self.rect_select_id = self.canvas.create_rectangle(event.x, event.y, event.x, event.y,
-                                                                        outline='blue', dash=(3, 2), tags=('rect_select',))
-                    try:
-                        print(f"DEBUG on_left_down: rect_select_id={self.rect_select_id}")
-                    except Exception:
-                        pass
-                    # clear any previous point selection only if not doing ctrl-modify
-                    try:
-                        if not getattr(self, 'rect_select_ctrl', False):
-                            self._clear_point_selection()
-                    except Exception:
-                        pass
-                    return
+            is_duct = (current_widget is getattr(self.app, 'duct_tab', None))
         except Exception:
-            pass
+            is_duct = False
+        hvac_active = bool(getattr(self.app, '_active_hvac_name', None))
 
-        shape, side = self.find_side_under_mouse(event.x, event.y, tol=5)
-        if shape and side and shape.editable:
-            self.push_history()
-            self.set_active_shape(shape)
-            self.active_side_name = side
-            self.drag_start_mouse_pos = (event.x, event.y)
-            self.drag_start_coords = shape.coords
+        if is_duct and hvac_active:
+            # Ctrl-click toggles single diffuser under cursor
+            try:
+                ctrl_pressed = bool(event.state & 0x0004)
+            except Exception:
+                ctrl_pressed = False
+
+            if ctrl_pressed:
+                try:
+                    nearby = list(self.canvas.find_overlapping(event.x-3, event.y-3, event.x+3, event.y+3))
+                except Exception:
+                    nearby = []
+                for iid in nearby:
+                    try:
+                        if self._is_diffuser_item(iid):
+                            if iid in self.selected_points:
+                                try:
+                                    self.canvas.itemconfigure(iid, outline='')
+                                except Exception:
+                                    pass
+                                try:
+                                    self.selected_points.remove(iid)
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    self.canvas.itemconfigure(iid, outline='red', width=2)
+                                except Exception:
+                                    pass
+                                try:
+                                    self.selected_points.add(iid)
+                                except Exception:
+                                    pass
+                            try:
+                                if getattr(self.app, 'duct_selected_label_var', None) is not None:
+                                    self.app.duct_selected_label_var.set(f"선택 디퓨저: {len(self.selected_points)}")
+                            except Exception:
+                                pass
+                            return
+                    except Exception:
+                        continue
+
+            # begin rectangle selection on main canvas
+            self.rect_select_start = (event.x, event.y)
+            self.rect_select_ctrl = bool(ctrl_pressed)
+            self.rect_draw_canvas = self.canvas
+            self.rect_draw_total = False
+            try:
+                if self.rect_select_id and self.rect_select_id in self.rect_draw_canvas.find_all():
+                    self.rect_draw_canvas.delete(self.rect_select_id)
+            except Exception:
+                pass
+            try:
+                self.clear_corner_highlight()
+            except Exception:
+                pass
+            try:
+                self.rect_select_id = self.rect_draw_canvas.create_rectangle(event.x, event.y, event.x, event.y,
+                                                                               outline='red', dash=(), width=3, fill='', tags=('rect_select',))
+                try:
+                    self.rect_draw_canvas.tag_raise(self.rect_select_id)
+                except Exception:
+                    try:
+                        self.rect_draw_canvas.lift(self.rect_select_id)
+                    except Exception:
+                        pass
+            except Exception:
+                self.rect_select_id = None
+            try:
+                if not self.rect_select_ctrl:
+                    self._clear_point_selection()
+            except Exception:
+                pass
+            try:
+                if getattr(self.app, 'duct_selected_label_var', None) is not None:
+                    self.app.duct_selected_label_var.set(f"선택 디퓨저: {len(self.selected_points)}")
+            except Exception:
+                pass
+            return
+
+        # Not in Duct mode: begin side-drag if cursor over a side
+        try:
+            shape_under, side_under = self.find_side_under_mouse(event.x, event.y, tol=5)
+        except Exception:
+            shape_under, side_under = (None, None)
+        if shape_under and side_under and getattr(shape_under, 'editable', True):
+            try:
+                self.push_history()
+            except Exception:
+                pass
+            try:
+                self.set_active_shape(shape_under)
+            except Exception:
+                pass
+            try:
+                self.active_side_name = side_under
+                self.drag_start_mouse_pos = (event.x, event.y)
+                self.drag_start_coords = shape_under.coords
+            except Exception:
+                self.active_side_name = None
+                self.drag_start_mouse_pos = None
+                self.drag_start_coords = None
+            return
+        # on_left_down finishes here; dragging handled by on_left_drag
+        return
 
     def on_left_drag(self, event):
+        """Handle mouse motion while Button1 is down: update rect-select or perform shape dragging."""
+        # Determine whether Duct-mode rect-selection is appropriate for this event.
+        try:
+            try:
+                current_widget = self.app.left_notebook.nametowidget(self.app.left_notebook.select())
+            except Exception:
+                current_widget = None
+            is_duct = (current_widget is getattr(self.app, 'duct_tab', None))
+        except Exception:
+            is_duct = False
+        hvac_active = bool(getattr(self.app, '_active_hvac_name', None))
+
         # If we're doing a rectangle selection (Duct tab + HVAC selected), update the rect and return
         try:
-            if getattr(self, 'rect_select_start', None):
-                x0, y0 = self.rect_select_start
-                # update rectangle outline
-                if self.rect_select_id and self.rect_select_id in self.canvas.find_all():
+            if is_duct and hvac_active:
+                # If a rect select already started, use its start
+                if getattr(self, 'rect_select_start', None):
+                    x0, y0 = self.rect_select_start
+                else:
+                    # If no rect_select_start, but the user is dragging with Button1
+                    # held and the Duct tab is active, initialize rect selection here.
                     try:
-                        self.canvas.coords(self.rect_select_id, x0, y0, event.x, event.y)
+                        current_widget = None
+                        try:
+                            current_widget = self.app.left_notebook.nametowidget(self.app.left_notebook.select())
+                        except Exception:
+                            current_widget = None
+                        is_duct = (current_widget is getattr(self.app, 'duct_tab', None))
                     except Exception:
-                        pass
+                        is_duct = False
+                    try:
+                        button1_down = bool(event.state & 0x100)
+                    except Exception:
+                        button1_down = False
+                    if is_duct and getattr(self.app, '_active_hvac_name', None) and button1_down:
+                        # initialize rect select at current point
+                        try:
+                            ctrl_pressed = bool(event.state & 0x0004)
+                        except Exception:
+                            ctrl_pressed = False
+                        try:
+                            self.rect_select_ctrl = ctrl_pressed
+                            self.rect_select_start = (event.x, event.y)
+                            if self.rect_select_id and getattr(self, 'overlay', None) and self.rect_select_id in self.overlay.find_all():
+                                try:
+                                    self.overlay.delete(self.rect_select_id)
+                                except Exception:
+                                    pass
+                            try:
+                                self.clear_corner_highlight()
+                            except Exception:
+                                pass
+                            try:
+                                # Prefer main canvas rect if overlay is not available
+                                if getattr(self, 'overlay', None):
+                                    self.rect_select_id = self.overlay.create_rectangle(event.x, event.y, event.x, event.y,
+                                                        outline='black', dash=(), width=2, fill='yellow', stipple='gray25', tags=('rect_select',))
+                                else:
+                                    self.rect_select_id = self.rect_draw_canvas.create_rectangle(event.x, event.y, event.x, event.y,
+                                                        outline='black', dash=(), width=2, fill='yellow', tags=('rect_select',))
+                            except Exception:
+                                try:
+                                    self.rect_select_id = self.overlay.create_rectangle(event.x, event.y, event.x, event.y,
+                                                                                    outline='black', dash=(), width=2, fill='yellow', tags=('rect_select',))
+                                except Exception:
+                                    self.rect_select_id = None
+                            try:
+                                print(f"DEBUG on_left_drag: auto-began rect at ({event.x},{event.y}) id={self.rect_select_id} ctrl={self.rect_select_ctrl}")
+                            except Exception:
+                                pass
+                            try:
+                                # ensure rectangle is on top so it's visible above shapes
+                                if getattr(self, 'overlay', None) and self.rect_select_id in self.overlay.find_all():
+                                    try:
+                                        self.overlay.tag_raise(self.rect_select_id)
+                                    except Exception:
+                                        try:
+                                            self.overlay.lift(self.rect_select_id)
+                                        except Exception:
+                                            pass
+                                    try:
+                                        self.overlay.itemconfigure(self.rect_select_id, outline='red', width=2)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            # clear previous selection unless ctrl-modifying
+                            try:
+                                if not getattr(self, 'rect_select_ctrl', False):
+                                    self._clear_point_selection()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                # if we initialized, fall through to update coords below
+                if not getattr(self, 'rect_select_start', None):
+                    return
+                # update rectangle outline on the canvas it was drawn on
+                try:
+                    drawc = getattr(self, 'rect_draw_canvas', None) or getattr(self, 'overlay', None) or self.canvas
+                    if self.rect_select_id and drawc and self.rect_select_id in drawc.find_all():
+                        try:
+                            drawc.coords(self.rect_select_id, x0, y0, event.x, event.y)
+                            # ensure visible and on top after coords change
+                            try:
+                                drawc.tag_raise(self.rect_select_id)
+                            except Exception:
+                                try:
+                                    drawc.lift(self.rect_select_id)
+                                except Exception:
+                                    pass
+                            try:
+                                drawc.itemconfigure(self.rect_select_id, outline='black', width=2, fill='yellow', stipple='gray25')
+                            except Exception:
+                                try:
+                                    drawc.itemconfigure(self.rect_select_id, outline='black', width=2, fill='yellow')
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 return
+            else:
+                # Not in Duct mode: clear any lingering rectangle-selection state so
+                # Room Design dragging is not affected by previous Duct actions.
+                try:
+                    if getattr(self, 'rect_select_id', None):
+                        drawc = getattr(self, 'rect_draw_canvas', None) or getattr(self, 'overlay', None) or self.canvas
+                        if drawc and self.rect_select_id in drawc.find_all():
+                            try:
+                                drawc.delete(self.rect_select_id)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    self.rect_select_id = None
+                    self.rect_select_start = None
+                    self.rect_select_ctrl = False
+                    self.rect_draw_canvas = None
+                    self.rect_draw_total = False
+                except Exception:
+                    pass
         except Exception:
             pass
-        # 도형 전체 이동
+
+        # 도형 전체 이동 (shape dragging)
         if self.moving_shape and self.move_start_mouse_pos and self.move_start_shape_coords:
             dx = event.x - self.move_start_mouse_pos[0]
             dy = event.y - self.move_start_mouse_pos[1]
@@ -1008,6 +1311,10 @@ class Palette:
 
     def on_left_up(self, event):
         """Handle left mouse button release: finish moves/drags and finalize rect selection."""
+        try:
+            print(f"DEBUG on_left_up ENTRY at ({event.x},{event.y}) widget={event.widget}")
+        except Exception:
+            pass
         if self.moving_shape:
             self.clear_edge_snap_highlight(self.moving_shape)
         self.moving_shape = None
@@ -1026,13 +1333,27 @@ class Palette:
             if getattr(self, 'rect_select_start', None):
                 x0, y0 = self.rect_select_start
                 x1, y1 = event.x, event.y
-                if self.rect_select_id and self.rect_select_id in self.canvas.find_all():
-                    try:
-                        self.canvas.delete(self.rect_select_id)
-                    except Exception:
-                        pass
+                # delete the transient rect from the same canvas it was drawn on
+                try:
+                    drawc = getattr(self, 'rect_draw_canvas', None) or self.canvas
+                except Exception:
+                    drawc = self.canvas
+                try:
+                    if self.rect_select_id and drawc and self.rect_select_id in drawc.find_all():
+                        try:
+                            drawc.delete(self.rect_select_id)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 self.rect_select_id = None
                 self.rect_select_start = None
+                # clear rect_draw_canvas state
+                try:
+                    self.rect_draw_canvas = None
+                    self.rect_draw_total = False
+                except Exception:
+                    pass
                 # select ovals inside the rectangle
                 try:
                     minx = min(x0, x1)
@@ -1107,7 +1428,23 @@ class Palette:
                             except Exception:
                                 pass
                             try:
-                                self.canvas.itemconfigure(iid, outline='')
+                                # if this item is assigned to any HVAC, keep it red; else clear
+                                assigned = False
+                                try:
+                                    for m in getattr(self.app, 'hvac_map', {}).values():
+                                        try:
+                                            ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
+                                        except Exception:
+                                            ids_set = set(m.get('ids', set()) or set())
+                                        if iid in ids_set:
+                                            assigned = True
+                                            break
+                                except Exception:
+                                    assigned = False
+                                if assigned:
+                                    self.canvas.itemconfigure(iid, outline='red', width=2)
+                                else:
+                                    self.canvas.itemconfigure(iid, outline='')
                             except Exception:
                                 pass
                         else:
@@ -1116,7 +1453,23 @@ class Palette:
                             except Exception:
                                 pass
                             try:
-                                self.canvas.itemconfigure(iid, outline='red')
+                                # when user selects via drag, show selected-but-unassigned as blue
+                                assigned = False
+                                try:
+                                    for m in getattr(self.app, 'hvac_map', {}).values():
+                                        try:
+                                            ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
+                                        except Exception:
+                                            ids_set = set(m.get('ids', set()) or set())
+                                        if iid in ids_set:
+                                            assigned = True
+                                            break
+                                except Exception:
+                                    assigned = False
+                                if assigned:
+                                    self.canvas.itemconfigure(iid, outline='red', width=2)
+                                else:
+                                    self.canvas.itemconfigure(iid, outline='blue')
                             except Exception:
                                 pass
                     else:
@@ -1124,9 +1477,24 @@ class Palette:
                             current_selected.add(iid)
                         except Exception:
                             pass
-                        # visually mark selection (outline)
+                        # visually mark selection: blue if unassigned, red if assigned
                         try:
-                            self.canvas.itemconfigure(iid, outline='red')
+                            assigned = False
+                            try:
+                                for m in getattr(self.app, 'hvac_map', {}).values():
+                                    try:
+                                        ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
+                                    except Exception:
+                                        ids_set = set(m.get('ids', set()) or set())
+                                    if iid in ids_set:
+                                        assigned = True
+                                        break
+                            except Exception:
+                                assigned = False
+                            if assigned:
+                                self.canvas.itemconfigure(iid, outline='red', width=2)
+                            else:
+                                self.canvas.itemconfigure(iid, outline='blue')
                         except Exception:
                             pass
             # finalize selection set
@@ -1145,11 +1513,37 @@ class Palette:
 
     def _clear_point_selection(self):
         try:
+            # compute global set of assigned ids so assigned items stay red
+            assigned_all = set()
+            try:
+                for m in getattr(self.app, 'hvac_map', {}).values():
+                    try:
+                        for iid in m.get('ids', set()) or set():
+                            try:
+                                assigned_all.add(int(iid))
+                            except Exception:
+                                assigned_all.add(iid)
+                    except Exception:
+                        continue
+            except Exception:
+                assigned_all = set()
+
             for iid in list(self.selected_points):
                 try:
-                    self.canvas.itemconfigure(iid, outline='')
+                    # if this item is assigned to any HVAC, leave it red; otherwise clear outline
+                    if iid in assigned_all:
+                        try:
+                            self.canvas.itemconfigure(iid, outline='red', width=2)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self.canvas.itemconfigure(iid, outline='')
+                        except Exception:
+                            pass
                 except Exception:
                     pass
+            # clear selection set (assigned items remain highlighted red)
             self.selected_points.clear()
             try:
                 if getattr(self.app, 'duct_selected_label_var', None) is not None:
@@ -1157,6 +1551,29 @@ class Palette:
             except Exception:
                 pass
         except Exception:
+            pass
+
+    def clear_corner_highlight(self):
+        """Ensure the small corner highlight marker is removed from the canvas.
+
+        This is called before starting rectangle selection so the tiny red
+        corner dot does not visually occlude the rubber-band rectangle.
+        """
+        try:
+            if getattr(self, 'corner_highlight_id', None):
+                try:
+                    if self.corner_highlight_id in self.canvas.find_all():
+                        self.canvas.delete(self.corner_highlight_id)
+                except Exception:
+                    try:
+                        self.canvas.delete(self.corner_highlight_id)
+                    except Exception:
+                        pass
+                self.corner_highlight_id = None
+                self.corner_hover_shape = None
+                self.corner_hover_index = None
+        except Exception:
+            # non-critical; ignore
             pass
 
     # -------- 스냅 --------
@@ -1773,13 +2190,15 @@ class Palette:
                                     pass
                                 tbl = None
                             csv_shown = None
-                            # ensure no csv_msg is shown
                             try:
                                 if csv_msg is not None:
-                                    csv_msg.destroy()
+                                    try:
+                                        csv_msg.destroy()
+                                    except Exception:
+                                        pass
+                                    csv_msg = None
                             except Exception:
                                 pass
-                            csv_msg = None
                             return
                     except Exception:
                         pass
@@ -3578,7 +3997,135 @@ class ResizableRectApp:
         except Exception:
             messagebox.showerror("입력 오류", "디퓨저 담당면적에 양의 숫자를 입력하세요.")
             return
+        # Before auto-placing diffusers, clear any Duct-tab actions (main points, labels,
+        # highlights and hvac_map) so auto-placement starts from a clean state.
+        try:
+            self._clear_duct_state()
+        except Exception:
+            pass
         rc.auto_place_diffusers(a)
+
+    def _clear_duct_state(self):
+        """Clear all Duct-related transient state: main_point markers, text labels,
+        highlighted outlines, and hvac_map entries. This does not delete diffuser ovals.
+        """
+        try:
+            # iterate all stored hvac mappings and remove main_point/text items from their palettes
+            keys = list(self.hvac_map.keys())
+            for key in keys:
+                try:
+                    mapping = self.hvac_map.get(key)
+                    if not mapping or not isinstance(mapping, dict):
+                        try:
+                            del self.hvac_map[key]
+                        except Exception:
+                            pass
+                        continue
+                    pal = mapping.get('palette')
+                    ids = set(mapping.get('ids', set()) or set())
+                    if pal:
+                        for iid in list(ids):
+                            try:
+                                iid_int = int(iid)
+                            except Exception:
+                                iid_int = iid
+                            try:
+                                if iid_int in pal.canvas.find_all():
+                                    try:
+                                        tags = pal.canvas.gettags(iid_int)
+                                    except Exception:
+                                        tags = ()
+                                    try:
+                                        ctype = pal.canvas.type(iid_int)
+                                    except Exception:
+                                        ctype = None
+                                    # delete only main_point markers or text labels
+                                    if 'main_point' in tags or ctype == 'text':
+                                        try:
+                                            pal.canvas.delete(iid_int)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                # ignore errors when querying/deleting this item
+                                pass
+                        # clear highlighted outlines on this palette
+                        try:
+                            for hid in list(getattr(self, '_hvac_highlighted', set())):
+                                try:
+                                    if hid in pal.canvas.find_all():
+                                        pal.canvas.itemconfigure(hid, outline='')
+                                except Exception:
+                                    pass
+                            self._hvac_highlighted.clear()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            # finally clear the hvac_map entirely
+            try:
+                self.hvac_map.clear()
+            except Exception:
+                self.hvac_map = {}
+            try:
+                if getattr(self, 'duct_selected_label_var', None) is not None:
+                    self.duct_selected_label_var.set("선택 디퓨저: 0")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _refresh_diffuser_outlines(self, palette: 'Palette'):
+        """Update outlines on the given palette: assigned -> red, otherwise clear unless selected (blue).
+
+        This iterates over diffuser items known to the palette and sets outline color based
+        on whether the item id is present in any hvac_map mapping. If the item is also in
+        the palette.selected_points set, selected-but-unassigned items are shown as blue.
+        """
+        if palette is None:
+            return
+        try:
+            # build a set of all assigned ids across hvac_map (for fast lookup)
+            assigned_all = set()
+            try:
+                for m in getattr(self, 'hvac_map', {}).values():
+                    try:
+                        for iid in m.get('ids', set()) or set():
+                            try:
+                                assigned_all.add(int(iid))
+                            except Exception:
+                                assigned_all.add(iid)
+                    except Exception:
+                        continue
+            except Exception:
+                assigned_all = set()
+
+            # iterate diffuser items tracked on palette (use tag 'diffuser' where possible)
+            try:
+                candidates = list(palette.canvas.find_withtag('diffuser'))
+            except Exception:
+                candidates = list(palette.canvas.find_all())
+
+            for iid in candidates:
+                try:
+                    if iid in assigned_all:
+                        # assigned: red outline
+                        try:
+                            palette.canvas.itemconfigure(iid, outline='red', width=2)
+                        except Exception:
+                            pass
+                    else:
+                        # unassigned: if selected, blue; else clear
+                        try:
+                            if getattr(palette, 'selected_points', None) and iid in getattr(palette, 'selected_points', set()):
+                                palette.canvas.itemconfigure(iid, outline='blue')
+                            else:
+                                palette.canvas.itemconfigure(iid, outline='')
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     def _rename_duct_tab(self):
         """Rename the Duct tab at runtime using the entry value."""
@@ -3656,38 +4203,132 @@ class ResizableRectApp:
             sel_count = 0
             kinds = set()
             if rc is not None:
-                sel_points = getattr(rc, 'selected_points', set()) or set()
-                sel_count = len(sel_points)
-                for iid in sel_points:
-                    try:
-                        tags = tuple(rc.canvas.gettags(iid))
-                    except Exception:
-                        tags = ()
-                    kind = None
-                    # explicit per-item type tag: 'diffuser_type:NAME'
-                    for t in tags:
-                        if isinstance(t, str) and t.startswith('diffuser_type:'):
-                            kind = t.split(':', 1)[1]
-                            break
-                    # common tags: 'supply' / 'return'
-                    if not kind:
-                        if 'supply' in tags:
-                            kind = 'supply'
-                        elif 'return' in tags:
-                            kind = 'return'
-                    # fallback to fill color
-                    if not kind:
+                    # normalize selected point ids to ints where possible so comparisons
+                    # against stored hvac_map ids are robust
+                    sel_points_raw = getattr(rc, 'selected_points', set()) or set()
+                    sel_points_int = set()
+                    for iid in sel_points_raw:
                         try:
-                            fill = rc.canvas.itemcget(iid, 'fill')
-                            if fill:
-                                kind = f'color:{fill}'
+                            sel_points_int.add(int(iid))
                         except Exception:
-                            pass
-                    if not kind:
-                        kind = 'unknown'
-                    kinds.add(kind)
+                            sel_points_int.add(iid)
+                    sel_count = len(sel_points_int)
+                    # compute kinds from the normalized ids
+                    for iid in sel_points_int:
+                        try:
+                            tags = tuple(rc.canvas.gettags(iid))
+                        except Exception:
+                            tags = ()
+                        kind = None
+                        # explicit per-item type tag: 'diffuser_type:NAME'
+                        for t in tags:
+                            if isinstance(t, str) and t.startswith('diffuser_type:'):
+                                kind = t.split(':', 1)[1]
+                                break
+                        # common tags: 'supply' / 'return'
+                        if not kind:
+                            if 'supply' in tags:
+                                kind = 'supply'
+                            elif 'return' in tags:
+                                kind = 'return'
+                        # fallback to fill color
+                        if not kind:
+                            try:
+                                fill = rc.canvas.itemcget(iid, 'fill')
+                                if fill:
+                                    kind = f'color:{fill}'
+                            except Exception:
+                                pass
+                        if not kind:
+                            kind = 'unknown'
+                        kinds.add(kind)
 
             # show basic confirmation and update Duct tab label with counts
+            # Before confirming, check whether any of the selected diffusers are
+            # already assigned to some other HVAC in self.hvac_map. If so, notify
+            # the user and offer to reassign them to the current system.
+            try:
+                conflicts = {}
+                for other_name, mapping in list(self.hvac_map.items()):
+                    try:
+                        if not mapping or not isinstance(mapping, dict):
+                            continue
+                        if other_name == name:
+                            continue
+                        other_ids = set()
+                        for oi in mapping.get('ids', set()) or set():
+                            try:
+                                other_ids.add(int(oi))
+                            except Exception:
+                                other_ids.add(oi)
+                        inter = set(sel_points_int) & other_ids
+                        if inter:
+                            conflicts[other_name] = inter
+                    except Exception:
+                        continue
+                if conflicts:
+                    # build message listing conflicts per system
+                    parts = []
+                    total_conf = 0
+                    for oname, ids in conflicts.items():
+                        parts.append(f"{oname}: {len(ids)}개")
+                        total_conf += len(ids)
+                    msg = (f"선택한 디퓨저 중 {total_conf}개가 다른 시스템에 할당되어 있습니다:\n"
+                           + "\n".join(parts)
+                           + f"\n\n계속하면 이 디퓨저들은 현재 시스템 '{name}'으로 재할당됩니다. 계속하시겠습니까?")
+                    proceed = messagebox.askyesno("충돌 감지 - 재할당 확인", msg)
+                    if not proceed:
+                        # abort apply so user can adjust selection
+                        try:
+                            return
+                        except Exception:
+                            return
+                    # perform reassignment: remove ids from other mappings
+                    for oname, ids in conflicts.items():
+                        try:
+                            other_map = self.hvac_map.get(oname)
+                            if not other_map or not isinstance(other_map, dict):
+                                continue
+                            other_palette = other_map.get('palette')
+                            other_set = set()
+                            for oi in other_map.get('ids', set()) or set():
+                                try:
+                                    other_set.add(int(oi))
+                                except Exception:
+                                    other_set.add(oi)
+                            # remove conflicting ids
+                            for rem in ids:
+                                try:
+                                    if rem in other_set:
+                                        other_set.remove(rem)
+                                except Exception:
+                                    try:
+                                        other_set.discard(rem)
+                                    except Exception:
+                                        pass
+                            # update mapping
+                            try:
+                                other_map['ids'] = other_set
+                                self.hvac_map[oname] = other_map
+                            except Exception:
+                                try:
+                                    del self.hvac_map[oname]
+                                except Exception:
+                                    pass
+                            # refresh outlines on the other palette if available
+                            try:
+                                opal = other_map.get('palette')
+                                try:
+                                    self._refresh_diffuser_outlines(opal)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                        except Exception:
+                            continue
+            except Exception:
+                # non-fatal: continue
+                pass
             try:
                 messagebox.showinfo("적용", f"선택된 시스템: {name}")
             except Exception:
@@ -3699,6 +4340,75 @@ class ResizableRectApp:
                 self.duct_selected_label_var.set(f"선택 디퓨저: {sel_count} | 종류 수: {types_count} ({types_list})")
             except Exception:
                 # fallback: nothing to do
+                pass
+            # If this HVAC already has stored mapping on this palette, remove
+            # any previously-created main-point markers (and their text labels)
+            # before starting a new assignment. Do NOT delete diffuser items.
+            try:
+                existing_map = self.hvac_map.get(name)
+                if existing_map and isinstance(existing_map, dict):
+                    try:
+                        mapped_palette = existing_map.get('palette')
+                        mapped_ids = set(existing_map.get('ids', set()) or set())
+                    except Exception:
+                        mapped_palette = None
+                        mapped_ids = set()
+                    if mapped_palette is rc and mapped_ids:
+                        remaining = set()
+                        for iid in list(mapped_ids):
+                            try:
+                                # ensure iid is int
+                                iid_int = int(iid)
+                            except Exception:
+                                try:
+                                    iid_int = iid
+                                except Exception:
+                                    continue
+                            try:
+                                if iid_int not in rc.canvas.find_all():
+                                    continue
+                            except Exception:
+                                # if find_all fails for this id, skip
+                                try:
+                                    # still try to convert and skip
+                                    continue
+                                except Exception:
+                                    continue
+                            try:
+                                ctype = rc.canvas.type(iid_int)
+                                tags = rc.canvas.gettags(iid_int)
+                            except Exception:
+                                ctype = None
+                                tags = ()
+                            # delete only items that are main_point markers or text labels
+                            try:
+                                if 'main_point' in tags or ctype == 'text':
+                                    try:
+                                        rc.canvas.delete(iid_int)
+                                    except Exception:
+                                        pass
+                                    # don't keep this id
+                                    continue
+                                else:
+                                    # preserve other ids (diffusers etc.)
+                                    remaining.add(iid_int)
+                            except Exception:
+                                remaining.add(iid_int)
+                        # update mapping ids to remaining ones
+                        try:
+                            existing_map['ids'] = remaining
+                            self.hvac_map[name] = existing_map
+                        except Exception:
+                            try:
+                                del self.hvac_map[name]
+                            except Exception:
+                                pass
+                        # refresh outlines on current palette so removed main_point markers clear
+                        try:
+                            self._refresh_diffuser_outlines(rc)
+                        except Exception:
+                            pass
+            except Exception:
                 pass
             # Offer the user to assign one main point per kind interactively
             try:
@@ -3848,7 +4558,7 @@ class ResizableRectApp:
             for iid in mapped_for_palette:
                 try:
                     if iid in rc.canvas.find_all():
-                        rc.canvas.itemconfigure(iid, outline='red')
+                        rc.canvas.itemconfigure(iid, outline='red', width=2)
                         try:
                             rc.selected_points.add(iid)
                         except Exception:
@@ -3909,7 +4619,11 @@ class ResizableRectApp:
         def finish_assignment(success=True):
             # restore bindings
             try:
-                canvas.unbind('<Button-1>')
+                # remove temporary click/key handlers used during assignment
+                try:
+                    canvas.unbind('<Button-1>')
+                except Exception:
+                    pass
             except Exception:
                 pass
             try:
@@ -3923,6 +4637,62 @@ class ResizableRectApp:
             # focus back to root
             try:
                 self.root.focus_force()
+            except Exception:
+                pass
+            # restore the Palette's standard mouse bindings (left button handlers)
+            try:
+                # restore Palette instance handlers
+                canvas.bind('<ButtonPress-1>', rc.on_left_down)
+                canvas.bind('<B1-Motion>', rc.on_left_drag)
+                canvas.bind('<ButtonRelease-1>', rc.on_left_up)
+                # ensure canvas has focus to receive events
+                try:
+                    canvas.focus_set()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # Ensure the Palette instance transient state is fully reset so it doesn't
+            # interfere with normal Room Design interactions afterwards.
+            try:
+                # clear any rectangle-selection state
+                try:
+                    if getattr(rc, 'rect_select_id', None):
+                        drawc = getattr(rc, 'rect_draw_canvas', None) or getattr(rc, 'overlay', None) or rc.canvas
+                        if drawc and rc.rect_select_id in drawc.find_all():
+                            try:
+                                drawc.delete(rc.rect_select_id)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    rc.rect_select_id = None
+                    rc.rect_select_start = None
+                    rc.rect_select_ctrl = False
+                    rc.rect_draw_canvas = None
+                    rc.rect_draw_total = False
+                except Exception:
+                    pass
+                # clear any active side-drag or moving state
+                try:
+                    rc.active_side_name = None
+                    rc.drag_start_mouse_pos = None
+                    rc.drag_start_coords = None
+                    rc.moving_shape = None
+                    rc.move_start_mouse_pos = None
+                    rc.move_start_shape_coords = None
+                except Exception:
+                    pass
+                # ensure overlay is removed if present
+                try:
+                    if getattr(rc, 'overlay', None) is not None and getattr(rc, 'overlay', 'canvas') is not rc.canvas:
+                        try:
+                            rc.overlay.delete('all')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             except Exception:
                 pass
             # if assignment succeeded and hvac_name provided, record mapping
