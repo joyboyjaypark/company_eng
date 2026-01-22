@@ -3354,32 +3354,60 @@ class Palette:
             return
         if total <= 0:
             return
-
-        # collect all diffusers (both supply and return) belonging to this lab
-        all_diffusers = []
+        # collect diffusers and split into supply / return groups
+        supply_ids = []
+        return_ids = []
         for did in lab.get("diffuser_ids", []):
             try:
-                # accept any diffuser id listed (we place both supply and return tags)
-                all_diffusers.append(did)
+                tags = self.canvas.gettags(did)
             except Exception:
-                continue
+                tags = ()
+            try:
+                if 'supply' in tags:
+                    supply_ids.append(did)
+                elif 'return' in tags:
+                    return_ids.append(did)
+                else:
+                    # if neither tag present, treat as supply by default
+                    supply_ids.append(did)
+            except Exception:
+                # fallback: treat as supply
+                try:
+                    supply_ids.append(did)
+                except Exception:
+                    continue
 
         # ensure mapping exists
         lab.setdefault("diffuser_flows", {})
 
-        n_all = len(all_diffusers)
-        if n_all == 0:
-            # clear mapping if no diffusers present
+        # if no diffusers at all, clear mapping and return
+        if not supply_ids and not return_ids:
             lab["diffuser_flows"].clear()
             return
 
-        # distribute the room's TOTAL supply flow equally among all diffusers (S + R)
-        per_val = round(float(total) / n_all, 2)
-        for did in all_diffusers:
-            try:
-                lab["diffuser_flows"][did] = per_val
-            except Exception:
-                continue
+        # distribute total among supply diffusers (if any)
+        try:
+            if supply_ids:
+                per_supply = round(float(total) / len(supply_ids), 2)
+                for did in supply_ids:
+                    try:
+                        lab["diffuser_flows"][did] = per_supply
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # distribute total among return diffusers (if any)
+        try:
+            if return_ids:
+                per_return = round(float(total) / len(return_ids), 2)
+                for did in return_ids:
+                    try:
+                        lab["diffuser_flows"][did] = per_return
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
     # -------- 디퓨저 자동 배치 로직 --------
 
@@ -5258,7 +5286,101 @@ class ResizableRectApp:
                         pass
                     # store mapping with palette reference
                     try:
-                        self.hvac_map[hvac_name] = {'palette': rc, 'ids': ids}
+                        # store mapping with palette reference
+                        mapping_entry = {'palette': rc, 'ids': ids}
+                        # compute per-main-point aggregated flows across the whole HVAC mapping
+                        main_point_flows = {}
+                        try:
+                            # hvac_ids: all diffuser/main ids recorded for this HVAC system
+                            hvac_ids = set(ids)
+                            # For each assigned kind, sum flows of hvac_ids that match the kind
+                            for kind, info in state.get('assigned', {}).items():
+                                iid = info.get('iid')
+                                if not iid:
+                                    continue
+                                total = 0.0
+                                try:
+                                    # iterate every recorded id for this hvac and look up its palette/lab
+                                    for did in hvac_ids:
+                                        try:
+                                            # find the palette that contains this item id
+                                            found_pal = None
+                                            found_lab = None
+                                            for pal in getattr(self, 'palettes', []):
+                                                try:
+                                                    if did in pal.canvas.find_all():
+                                                        found_pal = pal
+                                                        break
+                                                except Exception:
+                                                    continue
+                                            if not found_pal:
+                                                continue
+                                            try:
+                                                tags = found_pal.canvas.gettags(did)
+                                            except Exception:
+                                                tags = ()
+                                            include = False
+                                            try:
+                                                if isinstance(kind, str) and (kind == 'supply' or kind == 'return'):
+                                                    if kind in tags:
+                                                        include = True
+                                                else:
+                                                    if f'diffuser_type:{kind}' in tags:
+                                                        include = True
+                                            except Exception:
+                                                include = False
+                                            if not include:
+                                                continue
+                                            # locate the lab containing this diffuser id
+                                            for lab in getattr(found_pal, 'generated_space_labels', []):
+                                                try:
+                                                    if did in (lab.get('diffuser_ids') or []):
+                                                        found_lab = lab
+                                                        break
+                                                except Exception:
+                                                    continue
+                                            if not found_lab:
+                                                continue
+                                            try:
+                                                df = float(found_lab.get('diffuser_flows', {}).get(did, 0.0))
+                                            except Exception:
+                                                try:
+                                                    df = float(found_lab.get('diffuser_flows', {}).get(int(did), 0.0))
+                                                except Exception:
+                                                    df = 0.0
+                                            total += df
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    total = 0.0
+                                main_point_flows[iid] = round(float(total), 2)
+                                # bind hover handlers to show tooltip for this main point
+                                try:
+                                    ft = f"{main_point_flows[iid]:.2f} m3/hr"
+                                    # bind enter/leave on the palette canvas where the main point exists
+                                    try:
+                                        mp_pal = rc
+                                        if iid not in mp_pal.canvas.find_all():
+                                            # try find the palette containing the main point
+                                            for pal2 in getattr(self, 'palettes', []):
+                                                try:
+                                                    if iid in pal2.canvas.find_all():
+                                                        mp_pal = pal2
+                                                        break
+                                                except Exception:
+                                                    continue
+                                        mp_pal.canvas.tag_bind(iid, '<Enter>', (lambda ev, pal=mp_pal, txt=ft: pal._show_flow_tooltip(txt, ev.x, ev.y)))
+                                        mp_pal.canvas.tag_bind(iid, '<Leave>', (lambda ev, pal=mp_pal: pal._hide_flow_tooltip()))
+                                    except Exception:
+                                        # fallback: bind to current palette
+                                        rc.canvas.tag_bind(iid, '<Enter>', (lambda ev, rc=rc, txt=ft: rc._show_flow_tooltip(txt, ev.x, ev.y)))
+                                        rc.canvas.tag_bind(iid, '<Leave>', (lambda ev, rc=rc: rc._hide_flow_tooltip()))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            main_point_flows = {}
+                        mapping_entry['main_point_flows'] = main_point_flows
+                        self.hvac_map[hvac_name] = mapping_entry
                     except Exception:
                         pass
             except Exception:
