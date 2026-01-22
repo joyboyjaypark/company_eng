@@ -3820,6 +3820,62 @@ class Palette:
                 self._distribute_supply_for_lab(lab)
             except Exception:
                 pass
+            # create small persistent flow labels next to each diffuser so users can
+            # immediately see assigned per-diffuser flows
+            try:
+                df_map = lab.get('diffuser_flows', {}) if lab else {}
+                for did in list(diffuser_ids):
+                    try:
+                        coords = self.canvas.coords(did)
+                        if not coords or len(coords) < 4:
+                            continue
+                        cx = (coords[0] + coords[2]) / 2.0
+                        cy = (coords[1] + coords[3]) / 2.0
+                        # determine color from supply/return tag on the diffuser
+                        try:
+                            tags = self.canvas.gettags(did)
+                        except Exception:
+                            tags = ()
+                        if 'supply' in tags:
+                            fcol = 'darkgreen'
+                        elif 'return' in tags:
+                            fcol = 'darkblue'
+                        else:
+                            fcol = 'black'
+                        # fetch flow value (fallback to 0)
+                        qval = 0.0
+                        try:
+                            qval = float(df_map.get(did, df_map.get(int(did), 0.0) or 0.0))
+                        except Exception:
+                            try:
+                                qval = float(str(df_map.get(did) or df_map.get(int(did) or 0)))
+                            except Exception:
+                                qval = 0.0
+                        # formatted text
+                        try:
+                            txt = f"{qval:,.0f} m3/h"
+                        except Exception:
+                            txt = f"{qval:.0f} m3/h"
+                        # build tags: keep generic 'diffuser_flow' and include hvac tag if present
+                        tgs = ['diffuser_flow']
+                        try:
+                            hv = lab.get('hvac_text')
+                            if hv:
+                                tgs.append(f'hvac:{hv}')
+                        except Exception:
+                            pass
+                        # place label just right of diffuser
+                        try:
+                            self.canvas.create_text(cx + radius + 6, cy, text=txt, anchor=tk.W, fill=fcol, font=("Arial", 8), tags=tuple(tgs))
+                        except Exception:
+                            try:
+                                self.canvas.create_text(cx + radius + 6, cy, text=txt, anchor=tk.W, fill=fcol, font=("Arial", 8))
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
 
     # -------- 저장/불러오기용 직렬화 --------
 
@@ -4508,7 +4564,873 @@ class ResizableRectApp:
             self.sizing_text.insert(tk.END, f"균등 배분 실패: {e}\n")
 
     def _sizing_composite(self):
-        self.sizing_text.insert(tk.END, "종합 사이징 실행(플레이스홀더)\n")
+        self.sizing_text.insert(tk.END, "종합 사이징 실행: 덕트 자동 라우팅을 시작합니다.\n")
+        # run router for every HVAC system recorded
+        try:
+            for name in list(self.hvac_map.keys()):
+                try:
+                    self.auto_route_ducts(name)
+                    self.sizing_text.insert(tk.END, f"  - {name}: 라우팅 완료\n")
+                except Exception as e:
+                    self.sizing_text.insert(tk.END, f"  - {name}: 라우팅 실패: {e}\n")
+        except Exception as e:
+            self.sizing_text.insert(tk.END, f"종합 사이징 오류: {e}\n")
+
+    def auto_route_ducts(self, hvac_name, max_add_steiner=30):
+        """Auto-route ducts for the HVAC system named `hvac_name`.
+
+        Uses a simple MST + iterative 1-Steiner heuristic (I1S) and L-shaped
+        routing between grid indices; draws horizontal/vertical segments on
+        the associated palettes and tags them with ('duct', f'hvac:{hvac_name}').
+        """
+        # collect mapping
+        mapping = self.hvac_map.get(hvac_name)
+        if not mapping:
+            raise ValueError('해당 HVAC 매핑이 없습니다.')
+        # collect terminals: inlets (main supply points) and outlets (diffusers)
+        terminals = []  # list of (ix, iy) grid indices
+        terminal_items = []  # parallel list of (palette, iid, kind)
+
+        # collect candidate ids (mapping['ids'] contains diffuser/main ids and labels)
+        ids = set(mapping.get('ids', set()) or set())
+        # also include any items tagged diffuser in the stored palette
+        pal = mapping.get('palette')
+        if pal is None:
+            raise ValueError('매핑된 팔레트가 없습니다.')
+
+        # use a common world grid (meters) so terminals on different palettes align
+        grid_m = 0.5  # grid spacing in meters
+
+        # iterate palette(s) belonging to this hvac mapping and collect terminals
+        for did in list(ids):
+            try:
+                did_int = int(did)
+            except Exception:
+                did_int = did
+            # find palette that contains this id
+            found_pal = None
+            for p in getattr(self, 'palettes', []):
+                try:
+                    if did_int in p.canvas.find_all():
+                        found_pal = p
+                        break
+                except Exception:
+                    continue
+            if not found_pal:
+                continue
+            try:
+                tags = found_pal.canvas.gettags(did_int)
+            except Exception:
+                tags = ()
+            # compute center pixel coords
+            try:
+                c = found_pal.canvas.coords(did_int)
+                if not c or len(c) < 4:
+                    continue
+                cx = (c[0] + c[2]) / 2.0
+                cy = (c[1] + c[3]) / 2.0
+            except Exception:
+                continue
+            # determine kind: inlet if main_point and supply tag, outlet if diffuser without main_point
+            is_main = 'main_point' in tags
+            is_supply = ('supply' in tags) or any(t.startswith('diffuser_type:') and 'supply' in t for t in tags)
+            is_diffuser = 'diffuser' in tags
+            if is_main and is_supply:
+                terminal_type = 'inlet'
+            elif is_diffuser and not is_main:
+                terminal_type = 'outlet'
+            else:
+                # include anything tagged as diffuser as outlet
+                if is_diffuser:
+                    terminal_type = 'outlet'
+                else:
+                    terminal_type = 'outlet'
+
+            # convert pixel coords to world meters using the palette's scale (pixels per meter)
+            try:
+                if hasattr(found_pal, 'pixel_to_meter'):
+                    wx = found_pal.pixel_to_meter(cx)
+                    wy = found_pal.pixel_to_meter(cy)
+                else:
+                    # fallback: use stored scale (pixels per meter)
+                    scale_px_per_m = getattr(found_pal, 'scale', None) or 1.0
+                    wx = float(cx) / float(scale_px_per_m)
+                    wy = float(cy) / float(scale_px_per_m)
+            except Exception:
+                scale_px_per_m = getattr(found_pal, 'scale', None) or 1.0
+                wx = float(cx) / float(scale_px_per_m)
+                wy = float(cy) / float(scale_px_per_m)
+
+            # grid indices in unified meter grid
+            ix = int(round(wx / grid_m))
+            iy = int(round(wy / grid_m))
+            terminals.append((ix, iy))
+            terminal_items.append((found_pal, did_int, terminal_type, cx, cy))
+
+        if len(terminals) < 2:
+            raise ValueError('라우팅할 터미널이 충분하지 않습니다 (최소 2개 필요).')
+
+        # reuse internal routines: prim MST + I1S + L-route choice
+        def manhattan(a, b):
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+        def prim_mst(pts):
+            n = len(pts)
+            if n <= 1:
+                return []
+            in_tree = [False] * n
+            dist = [10**18] * n
+            parent = [-1] * n
+            dist[0] = 0
+            for _ in range(n):
+                u = -1
+                best = 10**18
+                for i in range(n):
+                    if not in_tree[i] and dist[i] < best:
+                        best = dist[i]
+                        u = i
+                if u == -1:
+                    break
+                in_tree[u] = True
+                for v in range(n):
+                    if in_tree[v] or v == u:
+                        continue
+                    w = manhattan(pts[u], pts[v])
+                    if w < dist[v]:
+                        dist[v] = w
+                        parent[v] = u
+            edges = []
+            for v in range(1, n):
+                if parent[v] != -1:
+                    edges.append((v, parent[v]))
+            return edges
+
+        def mst_length(pts, edges):
+            total = 0
+            for i, j in edges:
+                total += manhattan(pts[i], pts[j])
+            return total
+
+        def hanan_candidates(terms):
+            xs = sorted(set([p[0] for p in terms]))
+            ys = sorted(set([p[1] for p in terms]))
+            cands = []
+            for x in xs:
+                for y in ys:
+                    cands.append((x, y))
+            return cands
+
+        def iterated_1_steiner(terminals, max_add=30, min_improve=1):
+            P = list(terminals)
+            for _ in range(max_add):
+                base_edges = prim_mst(P)
+                base_L = mst_length(P, base_edges)
+                best_s = None
+                best_L = base_L
+                cand_points = hanan_candidates(terminals)
+                existing = set(P)
+                for s in cand_points:
+                    if s in existing:
+                        continue
+                    testP = P + [s]
+                    test_edges = prim_mst(testP)
+                    test_L = mst_length(testP, test_edges)
+                    if test_L < best_L:
+                        best_L = test_L
+                        best_s = s
+                if best_s is None:
+                    break
+                if (base_L - best_L) < min_improve:
+                    break
+                P.append(best_s)
+            edges = prim_mst(P)
+            return P, edges
+
+        # Partition terminals by supply/return and run router per partition so
+        # supply main-point(s) form the trunk that branches to supply diffusers
+        # and similarly for return. This prevents mixing supply and return networks.
+        duct_segments = set()
+        seg_flow_map = {}
+
+        def norm_seg(x1, y1, x2, y2):
+            if x1 == x2 and y1 == y2:
+                return None
+            if x1 == x2:
+                a, b = sorted([y1, y2])
+                return ('V', x1, a, b)
+            if y1 == y2:
+                a, b = sorted([x1, x2])
+                return ('H', y1, a, b)
+            raise ValueError('세그먼트는 수평/수직이어야 합니다.')
+
+        def l_route_opts(a, b):
+            x1, y1 = a
+            x2, y2 = b
+            s1 = norm_seg(x1, y1, x2, y1)
+            s2 = norm_seg(x2, y1, x2, y2)
+            opt1 = [s for s in (s1, s2) if s is not None]
+            t1 = norm_seg(x1, y1, x1, y2)
+            t2 = norm_seg(x1, y2, x2, y2)
+            opt2 = [s for s in (t1, t2) if s is not None]
+            return opt1, opt2
+
+        def process_terminals(terminals_local, terminal_items_local, root_did=None):
+            """Run I1S + L-routing on a subset of terminals and return (segments, seg_flow_map).
+            """
+            if not terminals_local or len(terminals_local) < 2:
+                return set(), {}
+
+            # compute Steiner-augmented MST
+            P_local, edges_local = iterated_1_steiner(terminals_local, max_add=max_add_steiner, min_improve=1)
+
+            local_segments = set()
+
+            def add_seg_local(sg):
+                if sg is None:
+                    return
+                local_segments.add(sg)
+
+            def route_edge_local(a, b):
+                opt1, opt2 = l_route_opts(a, b)
+                # prefer options that overlap existing global duct_segments to align trunks
+                def score_opts(opts):
+                    s = 0
+                    for seg in opts:
+                        if seg in duct_segments or seg in local_segments:
+                            s += 1
+                    return s
+                chosen = opt1 if score_opts(opt1) >= score_opts(opt2) else opt2
+                for s in chosen:
+                    add_seg_local(s)
+
+            for i, j in edges_local:
+                route_edge_local(P_local[i], P_local[j])
+
+            # Determine terminal flows (m3/h) for the original terminals (first T entries of P_local)
+            T_local = len(terminals_local)
+            terminal_flows_local = [0.0] * T_local
+            try:
+                total_known = 0.0
+                outlet_count = 0
+                for t_idx in range(T_local):
+                    try:
+                        pal_t, did_t, ttype, cx_t, cy_t = terminal_items_local[t_idx]
+                    except Exception:
+                        pal_t = None
+                        did_t = None
+                        ttype = 'outlet'
+                    q = 0.0
+                    if ttype == 'outlet' and pal_t is not None and did_t is not None:
+                        try:
+                            for lab in getattr(pal_t, 'generated_space_labels', []):
+                                try:
+                                    if did_t in (lab.get('diffuser_ids') or []):
+                                        q = float(lab.get('diffuser_flows', {}).get(did_t, 0.0) or 0.0)
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            q = 0.0
+                    if ttype == 'inlet' and pal_t is not None and did_t is not None:
+                        try:
+                            mp = mapping.get('main_point_flows', {}) if mapping else {}
+                            qcand = None
+                            if isinstance(mp, dict):
+                                qcand = mp.get(did_t)
+                                if qcand is None:
+                                    try:
+                                        qcand = mp.get(int(did_t))
+                                    except Exception:
+                                        qcand = None
+                            if qcand is not None:
+                                try:
+                                    q = float(qcand)
+                                except Exception:
+                                    try:
+                                        q = float(str(qcand))
+                                    except Exception:
+                                        q = float(q or 0.0)
+                        except Exception:
+                            pass
+
+                    terminal_flows_local[t_idx] = float(q or 0.0)
+                    if ttype == 'outlet':
+                        outlet_count += 1
+                        total_known += terminal_flows_local[t_idx]
+            except Exception:
+                terminal_flows_local = [0.0] * T_local
+                total_known = 0.0
+                outlet_count = max(1, T_local)
+
+            # fallback equal distribution if needed
+            try:
+                if total_known <= 0.0:
+                    q_total = float(self.sizing_flow_entry.get() or 0.0)
+                    if q_total <= 0.0:
+                        q_total = sum(terminal_flows_local) or 0.0
+                    if q_total <= 0.0:
+                        q_total = 100.0 * max(1, outlet_count)
+                    per = q_total / max(1, outlet_count)
+                    for ti in range(T_local):
+                        try:
+                            if terminal_items_local[ti][2] == 'outlet':
+                                terminal_flows_local[ti] = per
+                        except Exception:
+                            terminal_flows_local[ti] = per
+            except Exception:
+                pass
+
+            # compute per-edge flows by rooting the tree at root_did (if provided)
+            adj_local = {k: set() for k in range(len(P_local))}
+            for (a, b) in edges_local:
+                adj_local[a].add(b)
+                adj_local[b].add(a)
+
+            # find root index in P_local (must correspond to an original terminal)
+            root_idx = None
+            if root_did is not None:
+                try:
+                    # terminals_local correspond to the first T_local entries in P_local
+                    for ti in range(T_local):
+                        try:
+                            if terminal_items_local[ti][1] == root_did:
+                                root_idx = ti
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    root_idx = None
+
+            # If no valid root found, fall back to the previous undirected component sum method
+            local_seg_map = {}
+            if root_idx is None:
+                def dfs_collect_local(start, blocked_a, blocked_b):
+                    seen = set()
+                    stack = [start]
+                    while stack:
+                        u = stack.pop()
+                        if u in seen:
+                            continue
+                        seen.add(u)
+                        for v in adj_local.get(u, ()): 
+                            if (u == blocked_a and v == blocked_b) or (u == blocked_b and v == blocked_a):
+                                continue
+                            if v not in seen:
+                                stack.append(v)
+                    return seen
+
+                for (i, j) in edges_local:
+                    comp = dfs_collect_local(i, i, j)
+                    f = 0.0
+                    for node in comp:
+                        if 0 <= node < T_local:
+                            try:
+                                f += float(terminal_flows_local[node])
+                            except Exception:
+                                pass
+                    edge_flow = float(f)
+                    a_pt = P_local[i]
+                    b_pt = P_local[j]
+                    opt1, opt2 = l_route_opts(a_pt, b_pt)
+                    def score(opts):
+                        s = 0
+                        for seg in opts:
+                            if seg in duct_segments or seg in local_segments:
+                                s += 1
+                        return s
+                    chosen = opt1 if score(opt1) >= score(opt2) else opt2
+                    for seg in chosen:
+                        local_seg_map[seg] = local_seg_map.get(seg, 0.0) + edge_flow
+            else:
+                # directionally compute subtree sums from root
+                # build parent-child tree by BFS from root_idx
+                parent = {root_idx: None}
+                order = [root_idx]
+                stack = [root_idx]
+                while stack:
+                    u = stack.pop(0)
+                    for v in adj_local.get(u, ()): 
+                        if v in parent:
+                            continue
+                        parent[v] = u
+                        order.append(v)
+                        stack.append(v)
+
+                # compute subtree sums bottom-up; initialize node_flow for terminals
+                node_flow = {i: 0.0 for i in range(len(P_local))}
+                for i in range(len(P_local)):
+                    if 0 <= i < T_local:
+                        try:
+                            node_flow[i] = float(terminal_flows_local[i])
+                        except Exception:
+                            node_flow[i] = 0.0
+                    else:
+                        node_flow[i] = 0.0
+
+                # process nodes in reverse BFS order to accumulate child flows
+                for u in reversed(order):
+                    p = parent.get(u)
+                    if p is not None:
+                        node_flow[p] = node_flow.get(p, 0.0) + node_flow.get(u, 0.0)
+
+                # for each edge (p <- c), assign c's subtree sum as edge flow
+                for (a, b) in edges_local:
+                    # determine orientation: parent-child
+                    if parent.get(b) == a:
+                        child = b
+                    elif parent.get(a) == b:
+                        child = a
+                    else:
+                        # fallback: choose smaller index as child (shouldn't happen)
+                        child = b
+                    edge_flow = float(node_flow.get(child, 0.0))
+                    a_pt = P_local[a]
+                    b_pt = P_local[b]
+                    opt1, opt2 = l_route_opts(a_pt, b_pt)
+                    def score(opts):
+                        s = 0
+                        for seg in opts:
+                            if seg in duct_segments or seg in local_segments:
+                                s += 1
+                        return s
+                    chosen = opt1 if score(opt1) >= score(opt2) else opt2
+                    for seg in chosen:
+                        local_seg_map[seg] = local_seg_map.get(seg, 0.0) + edge_flow
+
+            return local_segments, local_seg_map
+
+        # build supply and return partitions based on canvas tags
+        supply_idxs = []
+        return_idxs = []
+        # compute global terminal_flows (aligned with `terminals`) for later debug/fallback
+        terminal_flows = [0.0] * len(terminals)
+        try:
+            total_known = 0.0
+            outlet_count = 0
+            for t_idx in range(len(terminals)):
+                try:
+                    pal_t, did_t, ttype, cx_t, cy_t = terminal_items[t_idx]
+                except Exception:
+                    pal_t = None
+                    did_t = None
+                    ttype = 'outlet'
+                q = 0.0
+                if ttype == 'outlet' and pal_t is not None and did_t is not None:
+                    try:
+                        for lab in getattr(pal_t, 'generated_space_labels', []):
+                            try:
+                                if did_t in (lab.get('diffuser_ids') or []):
+                                    q = float(lab.get('diffuser_flows', {}).get(did_t, 0.0) or 0.0)
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        q = 0.0
+                if ttype == 'inlet' and pal_t is not None and did_t is not None:
+                    try:
+                        mp = mapping.get('main_point_flows', {}) if mapping else {}
+                        qcand = None
+                        if isinstance(mp, dict):
+                            qcand = mp.get(did_t)
+                            if qcand is None:
+                                try:
+                                    qcand = mp.get(int(did_t))
+                                except Exception:
+                                    qcand = None
+                        if qcand is not None:
+                            try:
+                                q = float(qcand)
+                            except Exception:
+                                try:
+                                    q = float(str(qcand))
+                                except Exception:
+                                    q = float(q or 0.0)
+                    except Exception:
+                        pass
+
+                terminal_flows[t_idx] = float(q or 0.0)
+                if ttype == 'outlet':
+                    outlet_count += 1
+                    total_known += terminal_flows[t_idx]
+        except Exception:
+            terminal_flows = [0.0] * len(terminals)
+            total_known = 0.0
+            outlet_count = max(1, len(terminals))
+
+        try:
+            if total_known <= 0.0:
+                q_total = float(self.sizing_flow_entry.get() or 0.0)
+                if q_total <= 0.0:
+                    q_total = sum(terminal_flows) or 0.0
+                if q_total <= 0.0:
+                    q_total = 100.0 * max(1, outlet_count)
+                per = q_total / max(1, outlet_count)
+                for ti in range(len(terminals)):
+                    try:
+                        if terminal_items[ti][2] == 'outlet':
+                            terminal_flows[ti] = per
+                    except Exception:
+                        terminal_flows[ti] = per
+        except Exception:
+            pass
+        for idx, (pal_t, did_t, ttype, cx_t, cy_t) in enumerate(terminal_items):
+            try:
+                tags = pal_t.canvas.gettags(did_t)
+            except Exception:
+                tags = ()
+            is_supply_tag = ('supply' in tags) or any(t.startswith('diffuser_type:') and 'supply' in t for t in tags)
+            is_return_tag = ('return' in tags) or any(t.startswith('diffuser_type:') and 'return' in t for t in tags)
+            # classify: prefer explicit supply/return tags, else use terminal type
+            if is_supply_tag or (ttype == 'inlet' and is_supply_tag):
+                supply_idxs.append(idx)
+            if is_return_tag or (ttype == 'inlet' and is_return_tag):
+                return_idxs.append(idx)
+            # if neither tag found, classify outlets according to ttype as outlets and include in both partitions by default
+            if not is_supply_tag and not is_return_tag:
+                if ttype == 'outlet':
+                    # infer supply/return by presence of 'supply'/'return' in diffuser labels is absent; default to supply
+                    supply_idxs.append(idx)
+
+        # prepare terminal sublists
+        def pick_by_idxs(idxs):
+            return [terminals[i] for i in idxs], [terminal_items[i] for i in idxs]
+
+        ts_supply, ti_supply = pick_by_idxs(supply_idxs)
+        ts_return, ti_return = pick_by_idxs(return_idxs)
+
+        # run router for supply only (do not draw return network)
+        try:
+            # choose a single supply main-point as root (prefer an 'inlet' in the supply terminal items)
+            root_did = None
+            try:
+                for pal_t, did_t, ttype, cx_t, cy_t in ti_supply:
+                    try:
+                        if ttype == 'inlet':
+                            root_did = did_t
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                root_did = None
+            # fallback: if no inlet found among supply terminals, use the first supply terminal id
+            try:
+                if root_did is None and ti_supply:
+                    root_did = ti_supply[0][1]
+            except Exception:
+                root_did = None
+
+            s_segs, s_map = process_terminals(ts_supply, ti_supply, root_did=root_did)
+            # use only supply segments/flows — skip return processing per user request
+            duct_segments = set(s_segs)
+            seg_flow_map = dict(s_map)
+        except Exception:
+            # on error fallback to empty
+            duct_segments = set()
+            seg_flow_map = {}
+
+        # sizing function (circular equivalent) - copy of calc formula
+        def calc_circular_diameter_mm(q_m3h, dp_mm_per_m):
+            try:
+                q = float(q_m3h)
+                dp = float(dp_mm_per_m)
+                if q <= 0 or dp <= 0:
+                    return 0.0
+                C = 3.295e-10
+                D = ((C * (q ** 1.9) / dp) ** 0.199) * 1000.0
+                return float(D)
+            except Exception:
+                return 0.0
+
+        def round_step_up(x, step=50.0):
+            import math
+            return math.ceil(x / step) * step
+
+        # Before drawing anything, remove any previous duct items for this hvac.
+        # Only remove items that are actual duct annotations/drawings (tagged 'duct')
+        # so that other hvac-scoped labels (e.g., 'main_point_flow', 'diffuser_flow') are preserved.
+        try:
+            for p in getattr(self, 'palettes', []):
+                try:
+                    # iterate items already tagged as 'duct' and delete those that belong to this hvac
+                    for iid in p.canvas.find_withtag('duct'):
+                        try:
+                            tags = p.canvas.gettags(iid)
+                        except Exception:
+                            tags = ()
+                        try:
+                            if f'hvac:{hvac_name}' in tags:
+                                p.canvas.delete(iid)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # draw size annotations for each segment (with readable background)
+        try:
+            for seg, q in list(seg_flow_map.items()):
+                try:
+                    orient, fixed, a, b = seg
+                    # compute pixel positions on mapping palette
+                    if hasattr(pal, 'meter_to_pixel'):
+                        spacing_px = pal.meter_to_pixel(grid_m)
+                    else:
+                        spacing_px = grid_m * getattr(pal, 'scale', 1.0)
+                    if orient == 'H':
+                        y = fixed * spacing_px
+                        x1, x2 = a * spacing_px, b * spacing_px
+                        mx = (x1 + x2) / 2.0
+                        my = y
+                    else:
+                        x = fixed * spacing_px
+                        y1, y2 = a * spacing_px, b * spacing_px
+                        mx = x
+                        my = (y1 + y2) / 2.0
+                    # compute D (mm) using default dp from UI
+                    try:
+                        dp_val = float(self.sizing_pressure_entry.get() or 0.1)
+                    except Exception:
+                        dp_val = 0.1
+                    D_exact = calc_circular_diameter_mm(max(0.0, q), max(1e-6, dp_val))
+                    # Convert circular D to rectangular W x H using chosen aspect ratio from sizing tab
+                    try:
+                        r_raw = (self.sizing_ratio_cb.get() or "2")
+                        r = float(r_raw)
+                        if r <= 0:
+                            r = 2.0
+                    except Exception:
+                        r = 2.0
+
+                    if D_exact > 0:
+                        try:
+                            a_cont = (D_exact / 1.3) * ((1.0 + r) ** 0.25) / (r ** 0.625)
+                            b_cont = r * a_cont
+                        except Exception:
+                            a_cont = D_exact / 1.3
+                            b_cont = a_cont * r
+
+                        # ensure width is larger
+                        w_cont = max(a_cont, b_cont)
+                        h_cont = min(a_cont, b_cont)
+
+                        import math
+                        def floor50(x):
+                            v = math.floor(x / 50.0) * 50
+                            return int(max(50, v))
+                        def ceil50(x):
+                            v = math.ceil(x / 50.0) * 50
+                            return int(max(50, v))
+
+                        w1 = floor50(w_cont)
+                        h1 = floor50(h_cont)
+
+                        def rect_to_circle(a_rect, b_rect):
+                            try:
+                                return 1.3 * (((a_rect * b_rect) ** 0.625) / ((a_rect + b_rect) ** 0.25))
+                            except Exception:
+                                return 0.0
+
+                        D1 = rect_to_circle(w1, h1)
+                        if D1 >= D_exact:
+                            w_final, h_final = w1, h1
+                        else:
+                            w2 = ceil50(w_cont)
+                            h2 = h1
+                            D2 = rect_to_circle(w2, h2)
+                            if D2 >= D_exact:
+                                w_final, h_final = w2, h2
+                            else:
+                                h3 = ceil50(h_cont)
+                                w3 = w2
+                                w_final, h_final = w3, h3
+                        W_lbl = int(w_final)
+                        H_lbl = int(h_final)
+                    else:
+                        W_lbl = 0
+                        H_lbl = 0
+
+                    label = f"{q:.0f} m3/h\n{W_lbl} x {H_lbl} mm"
+                    try:
+                        # draw a small leader/tick and place label offset to minimize occlusion
+                        tick_len = max(6, int(spacing_px * 0.08))
+                        text_pad = 6
+                        # prepare formatted spec and flow text (spec on top, flow below)
+                        try:
+                            spec_txt = f"{int(W_lbl):,} x {int(H_lbl):,} mm"
+                        except Exception:
+                            spec_txt = f"{W_lbl} x {H_lbl} mm"
+                        try:
+                            flow_txt = f"{q:,.0f} m3/h"
+                        except Exception:
+                            flow_txt = f"{q:.0f} m3/h"
+                        full_txt = f"{spec_txt}\n{flow_txt}"
+                        if orient == 'H':
+                            # vertical tick at midpoint, text above the line
+                            x_tick = mx
+                            y_tick1 = my
+                            y_tick2 = my - tick_len
+                            pal.canvas.create_line(x_tick, y_tick1, x_tick, y_tick2, fill='navy', width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick, y_tick2 - text_pad, text=full_txt, fill='navy', font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
+                        else:
+                            # horizontal tick at midpoint, text to the right
+                            y_tick = my
+                            x_tick1 = mx
+                            x_tick2 = mx + tick_len
+                            pal.canvas.create_line(x_tick1, y_tick, x_tick2, y_tick, fill='navy', width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick2 + text_pad, y_tick, text=full_txt, fill='navy', font=('Arial', 9), anchor='w', tags=('duct', f'hvac:{hvac_name}'))
+                    except Exception:
+                        try:
+                            pal.canvas.create_text(mx, my, text=label, fill='navy', font=('Arial', 10))
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Debug: print computed flows to sizing text for visibility
+        try:
+            self.sizing_text.insert(tk.END, f"[DEBUG] seg_flow_map entries: {len(seg_flow_map)}\n")
+            if seg_flow_map:
+                for s, qv in seg_flow_map.items():
+                    try:
+                        self.sizing_text.insert(tk.END, f"  seg={s} -> {qv:.1f} m3/h\n")
+                    except Exception:
+                        self.sizing_text.insert(tk.END, f"  seg={s} -> {qv}\n")
+            self.sizing_text.insert(tk.END, f"[DEBUG] terminal_flows (count={len(terminal_flows)}): {terminal_flows}\n")
+        except Exception:
+            pass
+
+        # If no per-segment flows were computed, show per-terminal flow labels so user sees values
+        try:
+            if not seg_flow_map:
+                for ti, tf in enumerate(terminal_flows):
+                    try:
+                        pal_t, did_t, ttype, cx_t, cy_t = terminal_items[ti]
+                    except Exception:
+                        continue
+                    try:
+                        # compute rectangle size for terminal using sizing inputs
+                        try:
+                            dp_val_t = float(self.sizing_pressure_entry.get() or 0.1)
+                        except Exception:
+                            dp_val_t = 0.1
+                        # treat per-terminal flow similarly
+                        D_t = calc_circular_diameter_mm(max(0.0, tf), max(1e-6, dp_val_t))
+                        try:
+                            r_raw = (self.sizing_ratio_cb.get() or "2")
+                            r = float(r_raw)
+                            if r <= 0:
+                                r = 2.0
+                        except Exception:
+                            r = 2.0
+                        if D_t > 0:
+                            try:
+                                a_cont_t = (D_t / 1.3) * ((1.0 + r) ** 0.25) / (r ** 0.625)
+                                b_cont_t = r * a_cont_t
+                            except Exception:
+                                a_cont_t = D_t / 1.3
+                                b_cont_t = a_cont_t * r
+                            w_cont_t = max(a_cont_t, b_cont_t)
+                            h_cont_t = min(a_cont_t, b_cont_t)
+                            import math
+                            def floor50(x):
+                                v = math.floor(x / 50.0) * 50
+                                return int(max(50, v))
+                            def ceil50(x):
+                                v = math.ceil(x / 50.0) * 50
+                                return int(max(50, v))
+                            w1t = floor50(w_cont_t)
+                            h1t = floor50(h_cont_t)
+                            def rect_to_circle(a_rect, b_rect):
+                                try:
+                                    return 1.3 * (((a_rect * b_rect) ** 0.625) / ((a_rect + b_rect) ** 0.25))
+                                except Exception:
+                                    return 0.0
+                            D1t = rect_to_circle(w1t, h1t)
+                            if D1t >= D_t:
+                                w_final_t, h_final_t = w1t, h1t
+                            else:
+                                w2t = ceil50(w_cont_t)
+                                h2t = h1t
+                                D2t = rect_to_circle(w2t, h2t)
+                                if D2t >= D_t:
+                                    w_final_t, h_final_t = w2t, h2t
+                                else:
+                                    h3t = ceil50(h_cont_t)
+                                    w3t = w2t
+                                    w_final_t, h_final_t = w3t, h3t
+                            labtxt = f"{tf:.0f} m3/h\n{int(w_final_t)} x {int(h_final_t)} mm"
+                        else:
+                            labtxt = f"{tf:.0f} m3/h"
+                        # draw text with white background rectangle for visibility
+                        try:
+                            # draw small tick and offset text to avoid covering diffuser/line
+                            tick = 6
+                            pad = 6
+                            # place vertical tick up from terminal point and text above
+                            x0 = cx_t
+                            y0 = cy_t
+                            # labtxt currently already contains both lines when available; ensure ordering spec on top
+                            try:
+                                # If labtxt has 'm3/h' first, reorder
+                                if '\n' in labtxt and labtxt.strip().split('\n')[0].strip().endswith('m3/h'):
+                                    parts = labtxt.split('\n')
+                                    labtxt = parts[1] + '\n' + parts[0]
+                            except Exception:
+                                pass
+                            pal_t.canvas.create_line(x0, y0, x0, y0 - tick, fill='darkgreen', width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal_t.canvas.create_text(x0, y0 - tick - pad, text=labtxt, fill='darkgreen', font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
+                        except Exception:
+                            pal_t.canvas.create_text(cx_t + 8, cy_t - 10, text=labtxt, fill='darkgreen', font=('Arial', 10))
+                    except Exception:
+                        try:
+                            pal_t.canvas.create_text(cx_t + 8, cy_t - 10, text=str(tf), fill='darkgreen', font=('Arial', 8))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    # draw onto palettes (convert grid indices back to pixel coords)
+
+        # draw segments (convert grid indices back to pixel coords on the mapping palette)
+        try:
+            # determine pixel spacing for grid_m on the mapping palette
+            try:
+                if hasattr(pal, 'meter_to_pixel'):
+                    spacing_px = pal.meter_to_pixel(grid_m)
+                else:
+                    spacing_px = grid_m * getattr(pal, 'scale', 1.0)
+            except Exception:
+                spacing_px = grid_m * getattr(pal, 'scale', 1.0)
+        except Exception:
+            spacing_px = grid_m * getattr(pal, 'scale', 1.0)
+
+        for seg in duct_segments:
+            orient, fixed, a, b = seg
+            if orient == 'H':
+                y = fixed * spacing_px
+                x1, x2 = a * spacing_px, b * spacing_px
+                try:
+                    iid = pal.canvas.create_line(x1, y, x2, y, fill='blue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                except Exception:
+                    try:
+                        pal.canvas.create_line(x1, y, x2, y, fill='blue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                    except Exception:
+                        pass
+            else:
+                x = fixed * spacing_px
+                y1, y2 = a * spacing_px, b * spacing_px
+                try:
+                    iid = pal.canvas.create_line(x, y1, x, y2, fill='blue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                except Exception:
+                    try:
+                        pal.canvas.create_line(x, y1, x, y2, fill='blue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                    except Exception:
+                        pass
+
+        return True
 
     def _sizing_clear(self):
         try:
@@ -5165,6 +6087,7 @@ class ResizableRectApp:
             'assigned': assigned,
             'orig_bind_click': None,
             'orig_bind_key': None,
+            'preview_id': None,
         }
 
         def finish_assignment(success=True):
@@ -5175,10 +6098,29 @@ class ResizableRectApp:
                     canvas.unbind('<Button-1>')
                 except Exception:
                     pass
+                try:
+                    canvas.unbind('<Motion>')
+                except Exception:
+                    pass
             except Exception:
                 pass
             try:
                 canvas.unbind('<Key>')
+            except Exception:
+                pass
+            # remove any preview marker
+            try:
+                pid = state.get('preview_id')
+                if pid is not None:
+                    try:
+                        if pid in canvas.find_all():
+                            canvas.delete(pid)
+                    except Exception:
+                        try:
+                            canvas.delete(pid)
+                        except Exception:
+                            pass
+                    state['preview_id'] = None
             except Exception:
                 pass
             try:
@@ -5381,6 +6323,53 @@ class ResizableRectApp:
                             main_point_flows = {}
                         mapping_entry['main_point_flows'] = main_point_flows
                         self.hvac_map[hvac_name] = mapping_entry
+                        # create small on-canvas labels next to each main point showing aggregated flow
+                        try:
+                            for iid, qv in list(main_point_flows.items()):
+                                try:
+                                    # find palette that contains this main point id
+                                    mp_pal = rc
+                                    if iid not in mp_pal.canvas.find_all():
+                                        for pal2 in getattr(self, 'palettes', []):
+                                            try:
+                                                if iid in pal2.canvas.find_all():
+                                                    mp_pal = pal2
+                                                    break
+                                            except Exception:
+                                                continue
+                                    # get coords
+                                    try:
+                                        coords = mp_pal.canvas.coords(iid)
+                                        if not coords or len(coords) < 2:
+                                            continue
+                                        # main_point marker may be a shape or text; center accordingly
+                                        if len(coords) >= 4:
+                                            mx = (coords[0] + coords[2]) / 2.0
+                                            my = (coords[1] + coords[3]) / 2.0
+                                        else:
+                                            mx = coords[0]
+                                            my = coords[1]
+                                    except Exception:
+                                        continue
+                                    try:
+                                        txt = f"{float(qv):,.0f} m3/h"
+                                    except Exception:
+                                        try:
+                                            txt = f"{int(qv)} m3/h"
+                                        except Exception:
+                                            txt = str(qv)
+                                    # place label slightly above/right of main point
+                                    try:
+                                        mp_pal.canvas.create_text(mx + 8, my - 8, text=txt, anchor=tk.W, fill='red', font=("Arial", 9, "bold"), tags=('main_point_flow', f'hvac:{hvac_name}'))
+                                    except Exception:
+                                        try:
+                                            mp_pal.canvas.create_text(mx + 8, my - 8, text=txt, anchor=tk.W, fill='red', font=("Arial", 9))
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
                     except Exception:
                         pass
             except Exception:
@@ -5391,6 +6380,74 @@ class ResizableRectApp:
             if event.keysym == 'Escape':
                 messagebox.showinfo('취소', '메인 포인트 지정을 취소합니다.')
                 finish_assignment(False)
+
+        def on_motion(event):
+            # show a preview of where the main point would be snapped
+            try:
+                wx = canvas.canvasx(event.x)
+                wy = canvas.canvasy(event.y)
+                import math
+                spacing = max(1.0, rc.meter_to_pixel(0.5))
+                try:
+                    if rc.shapes:
+                        anchor_x = float(rc.shapes[0].coords[0])
+                        anchor_y = float(rc.shapes[0].coords[1])
+                    else:
+                        anchor_x = 0.0
+                        anchor_y = 0.0
+                except Exception:
+                    anchor_x = 0.0
+                    anchor_y = 0.0
+                rem_x = anchor_x - math.floor(anchor_x / spacing) * spacing
+                rem_y = anchor_y - math.floor(anchor_y / spacing) * spacing
+                kx = int(round((wx - rem_x) / spacing))
+                ky = int(round((wy - rem_y) / spacing))
+                cx = kx * spacing + rem_x
+                cy = ky * spacing + rem_y
+                # determine radius similar to on_click
+                try:
+                    radius = 3
+                    try:
+                        existing = list(canvas.find_withtag('diffuser'))
+                        if existing:
+                            c = canvas.coords(existing[0])
+                            if c and len(c) >= 4:
+                                radius = abs((c[2] - c[0]) / 2.0)
+                    except Exception:
+                        radius = 3
+                except Exception:
+                    radius = 3
+                # draw or move preview oval
+                try:
+                    pid = state.get('preview_id')
+                    if pid is None or pid not in canvas.find_all():
+                        # translucent preview (use empty outline and stipple via a transparent fill if unsupported, use light color)
+                        try:
+                            pid = canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
+                                                     fill='orange', outline='black', dash=(2, 2), tags=('preview',))
+                        except Exception:
+                            pid = canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
+                                                     fill='orange', outline='black', tags=('preview',))
+                        state['preview_id'] = pid
+                    else:
+                        try:
+                            canvas.coords(pid, cx - radius, cy - radius, cx + radius, cy + radius)
+                        except Exception:
+                            # recreate if move fails
+                            try:
+                                canvas.delete(pid)
+                            except Exception:
+                                pass
+                            try:
+                                pid = canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
+                                                         fill='orange', outline='black', dash=(2, 2), tags=('preview',))
+                                state['preview_id'] = pid
+                            except Exception:
+                                state['preview_id'] = None
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         def on_click(event):
             idx = state['index']
@@ -5451,6 +6508,21 @@ class ResizableRectApp:
                     tid = None
                 # record assignment
                 state['assigned'][kind] = {'iid': iid_new, 'label_id': tid, 'orig_fill': None}
+                # remove preview if present
+                try:
+                    pid = state.get('preview_id')
+                    if pid is not None:
+                        try:
+                            if pid in canvas.find_all():
+                                canvas.delete(pid)
+                        except Exception:
+                            try:
+                                canvas.delete(pid)
+                            except Exception:
+                                pass
+                        state['preview_id'] = None
+                except Exception:
+                    pass
             except Exception as e:
                 messagebox.showerror('오류', f'메인 포인트 생성 중 오류: {e}')
                 finish_assignment(False)
@@ -5470,6 +6542,7 @@ class ResizableRectApp:
         try:
             canvas.focus_set()
             canvas.bind('<Button-1>', lambda e: on_click(e))
+            canvas.bind('<Motion>', lambda e: on_motion(e))
             canvas.bind('<Key>', lambda e: on_key(e))
             canvas.configure(cursor='crosshair')
             # initial prompt for first kind
