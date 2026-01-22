@@ -3135,7 +3135,13 @@ class Palette:
                     "heat_equip_id": heat_equip_id,
                     "area_id": area_id,
                     "diffuser_ids": matched_diffusers, # 기존 디퓨저 점 유지
-                    "hvac_type": matched.get('hvac_type', 1) if isinstance(matched, dict) else 1
+                    "hvac_type": matched.get('hvac_type', 1) if isinstance(matched, dict) else 1,
+                    # Preserve HVAC metadata if present on the matched label so popup selections
+                    # (공조방식/공조상세) survive auto-generation.
+                    "hvac_text": matched.get('hvac_text') if isinstance(matched, dict) else None,
+                    "hvac_detail": matched.get('hvac_detail') if isinstance(matched, dict) else None,
+                    "hvac_detail_text": matched.get('hvac_detail_text') if isinstance(matched, dict) else None,
+                    "hvac_qty": matched.get('hvac_qty') if isinstance(matched, dict) else None
                 })
                 used_existing.append(matched)
             else:
@@ -4047,17 +4053,7 @@ class ResizableRectApp:
         duct_rename_btn = tk.Button(duct_rename_frame, text="이름 변경", command=self._rename_duct_tab)
         duct_rename_btn.pack(side=tk.LEFT, padx=(2, 4))
 
-        def _restore_default():
-            self.duct_tab_name_entry.delete(0, tk.END)
-            self.duct_tab_name_entry.insert(0, "Duct")
-            try:
-                idx = self.left_notebook.index(self.duct_tab)
-                self.left_notebook.tab(idx, text="Duct")
-            except Exception:
-                pass
-
-        restore_btn = tk.Button(duct_rename_frame, text="기본 복원", command=_restore_default)
-        restore_btn.pack(side=tk.LEFT)
+    # (기본 복원 버튼 제거됨)
 
         # --- Nested notebook inside Duct tab for sub-sections (사이징/두께/검사) ---
         try:
