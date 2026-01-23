@@ -218,12 +218,17 @@ class CloudStorage:
 
 
 # 싱글톤 인스턴스
+import threading
 _cloud_storage_instance = None
+_cloud_storage_lock = threading.Lock()
 
 
 def get_cloud_storage() -> CloudStorage:
-    """클라우드 스토리지 싱글톤 인스턴스 가져오기"""
+    """클라우드 스토리지 싱글톤 인스턴스 가져오기 (thread-safe)"""
     global _cloud_storage_instance
     if _cloud_storage_instance is None:
-        _cloud_storage_instance = CloudStorage()
+        with _cloud_storage_lock:
+            # Double-check locking pattern
+            if _cloud_storage_instance is None:
+                _cloud_storage_instance = CloudStorage()
     return _cloud_storage_instance

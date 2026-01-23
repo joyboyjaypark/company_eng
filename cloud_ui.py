@@ -104,8 +104,7 @@ class CloudUploadDialog(tk.Toplevel):
         try:
             memo = self.memo_text.get("1.0", tk.END).strip()
             metadata = {
-                "memo": memo,
-                "upload_time": datetime.now().isoformat()
+                "memo": memo
             }
             
             result = self.cloud_storage.upload_file(

@@ -232,14 +232,19 @@ class AsosGUI(tk.Tk):
         self.cancel_btn = ttk.Button(btn_frame, text="취소", command=self._cancel_fetch)
         self.cancel_btn.grid(row=0, column=3, padx=5)
         self.cancel_btn.state(['disabled'])
+        # Button positions
+        col = 4
         self.excel_btn = ttk.Button(btn_frame, text="엑셀로 저장", command=self.export_to_excel)
-        self.excel_btn.grid(row=0, column=4, padx=5)
+        self.excel_btn.grid(row=0, column=col, padx=5)
+        col += 1
         self.cloud_upload_btn = ttk.Button(btn_frame, text="클라우드 업로드", command=self.cloud_upload_data)
-        self.cloud_upload_btn.grid(row=0, column=5, padx=5)
+        self.cloud_upload_btn.grid(row=0, column=col, padx=5)
+        col += 1
         self.cloud_browser_btn = ttk.Button(btn_frame, text="클라우드 브라우저", command=self.cloud_browser)
-        self.cloud_browser_btn.grid(row=0, column=6, padx=5)
+        self.cloud_browser_btn.grid(row=0, column=col, padx=5)
+        col += 1
         self.quit_btn = ttk.Button(btn_frame, text="종료", command=self.destroy)
-        self.quit_btn.grid(row=0, column=7, padx=5)
+        self.quit_btn.grid(row=0, column=col, padx=5)
         row += 1
 
         self.status_var = tk.StringVar(value="진행: 0%")
@@ -992,12 +997,11 @@ class AsosGUI(tk.Tk):
             messagebox.showinfo("정보", "업로드할 데이터가 없습니다. 먼저 조회를 실행하세요.")
             return
         
-        # 임시 엑셀 파일 생성
+        # 임시 엑셀 파일 생성 (보안: 고유한 임시 파일 생성)
         import tempfile
         import os
         
-        temp_dir = tempfile.gettempdir()
-        temp_file = os.path.join(temp_dir, "temp_weather_data.xlsx")
+        temp_fd, temp_file = tempfile.mkstemp(suffix=".xlsx", prefix="weather_")
         
         try:
             import openpyxl
@@ -1007,6 +1011,9 @@ class AsosGUI(tk.Tk):
             return
         
         try:
+            # Close the file descriptor before writing with openpyxl
+            os.close(temp_fd)
+            
             # 임시 파일에 저장
             wb = openpyxl.Workbook()
             ws = wb.active

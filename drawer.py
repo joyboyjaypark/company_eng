@@ -7854,13 +7854,14 @@ class ResizableRectApp:
             messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
             return
         
-        # 임시 파일에 저장
+        # 임시 파일에 저장 (보안: 고유한 임시 파일 생성)
         import tempfile
-        temp_dir = tempfile.gettempdir()
-        temp_file = os.path.join(temp_dir, "temp_palette.json")
+        temp_fd, temp_file = tempfile.mkstemp(suffix=".json", prefix="palette_")
         
         try:
             data = rc.to_dict()
+            # Close the file descriptor and write to the file
+            os.close(temp_fd)
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             
