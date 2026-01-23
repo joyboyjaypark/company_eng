@@ -3788,9 +3788,17 @@ class Palette:
                     is_supply = ((ri + ci) % 2 == 0)
                     color = "green" if is_supply else "skyblue"
                     tag2 = "supply" if is_supply else "return"
+                    # assemble tags: diffuser, supply/return tag, and hvac tag if available
+                    tgs = ["diffuser", tag2]
+                    try:
+                        hv_txt = lab.get('hvac_text') if lab else None
+                        if hv_txt:
+                            tgs.append(f'hvac:{hv_txt}')
+                    except Exception:
+                        pass
                     did = self.canvas.create_oval(
                         x - radius, y - radius, x + radius, y + radius,
-                        fill=color, outline="", tags=("diffuser", tag2)
+                        fill=color, outline="", tags=tuple(tgs)
                     )
                     try:
                         # bind item-level enter/leave for reliable hover
@@ -4565,6 +4573,41 @@ class ResizableRectApp:
 
     def _sizing_composite(self):
         self.sizing_text.insert(tk.END, "종합 사이징 실행: 덕트 자동 라우팅을 시작합니다.\n")
+        # Before running routing, normalize hvac_map so that no canvas id
+        # appears in more than one mapping. This prevents cross-system mixing
+        # caused by duplicated ids in multiple hvac entries.
+        try:
+            assigned_global = set()
+            for name in list(self.hvac_map.keys()):
+                try:
+                    mapping = self.hvac_map.get(name)
+                    if not mapping or not isinstance(mapping, dict):
+                        continue
+                    orig_ids = set(mapping.get('ids', set()) or set())
+                    new_ids = set()
+                    removed = []
+                    for iid in orig_ids:
+                        try:
+                            iid_int = int(iid)
+                        except Exception:
+                            iid_int = iid
+                        if iid_int in assigned_global:
+                            removed.append(iid_int)
+                            continue
+                        new_ids.add(iid_int)
+                        assigned_global.add(iid_int)
+                    if removed:
+                        try:
+                            self.sizing_text.insert(tk.END, f"[CLEANUP] {name}: 중복 id 제거: {removed}\n")
+                        except Exception:
+                            pass
+                    mapping['ids'] = new_ids
+                    self.hvac_map[name] = mapping
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         # run router for every HVAC system recorded
         try:
             for name in list(self.hvac_map.keys()):
@@ -4602,6 +4645,41 @@ class ResizableRectApp:
         grid_m = 0.5  # grid spacing in meters
 
         # iterate palette(s) belonging to this hvac mapping and collect terminals
+        # only collect items that belong to this hvac mapping (by id list and hvac tag or mapping palette)
+        try:
+            # diagnostic: list mapping ids and where they live (palette and tags)
+            try:
+                self.sizing_text.insert(tk.END, f"[DIAG] hvac mapping '{hvac_name}' ids (count={len(ids)}):\n")
+                for did in list(ids):
+                    try:
+                        did_int = int(did)
+                    except Exception:
+                        did_int = did
+                    found_pal = None
+                    found_name = None
+                    try:
+                        for p in getattr(self, 'palettes', []):
+                            try:
+                                if did_int in p.canvas.find_all():
+                                    found_pal = p
+                                    found_name = getattr(p, 'name', None) or repr(p)
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    try:
+                        tags = found_pal.canvas.gettags(did_int) if found_pal is not None else ()
+                    except Exception:
+                        tags = ()
+                    try:
+                        self.sizing_text.insert(tk.END, f"  id={did_int} on={found_name} tags={tags}\n")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
         for did in list(ids):
             try:
                 did_int = int(did)
@@ -4622,6 +4700,14 @@ class ResizableRectApp:
                 tags = found_pal.canvas.gettags(did_int)
             except Exception:
                 tags = ()
+            # ensure this item actually belongs to this hvac mapping: either found in the mapping's palette
+            # or explicitly tagged with hvac:<hvac_name>
+            try:
+                if found_pal is not pal and (f'hvac:{hvac_name}' not in tags):
+                    # skip items that are not part of this hvac mapping
+                    continue
+            except Exception:
+                pass
             # compute center pixel coords
             try:
                 c = found_pal.canvas.coords(did_int)
@@ -5151,15 +5237,27 @@ class ResizableRectApp:
         try:
             for p in getattr(self, 'palettes', []):
                 try:
-                    # iterate items already tagged as 'duct' and delete those that belong to this hvac
+                    # iterate items already tagged as 'duct'
+                    # delete segments that belong to this hvac (have matching hvac tag)
+                    # and also remove legacy untagged duct segments (no hvac:* tag)
                     for iid in p.canvas.find_withtag('duct'):
                         try:
                             tags = p.canvas.gettags(iid)
                         except Exception:
                             tags = ()
                         try:
+                            # delete if explicitly belonging to this hvac
                             if f'hvac:{hvac_name}' in tags:
                                 p.canvas.delete(iid)
+                                continue
+                            # also delete legacy duct segments that have no hvac: tag at all
+                            has_hvac_tag = any(str(t).startswith('hvac:') for t in tags)
+                            if not has_hvac_tag:
+                                # legacy untagged duct - remove to avoid cross-system connections
+                                try:
+                                    p.canvas.delete(iid)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
                 except Exception:
@@ -5270,15 +5368,15 @@ class ResizableRectApp:
                             x_tick = mx
                             y_tick1 = my
                             y_tick2 = my - tick_len
-                            pal.canvas.create_line(x_tick, y_tick1, x_tick, y_tick2, fill='navy', width=1, tags=('duct', f'hvac:{hvac_name}'))
-                            pal.canvas.create_text(x_tick, y_tick2 - text_pad, text=full_txt, fill='navy', font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_line(x_tick, y_tick1, x_tick, y_tick2, fill='darkgreen', width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick, y_tick2 - text_pad, text=full_txt, fill='darkgreen', font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
                         else:
                             # horizontal tick at midpoint, text to the right
                             y_tick = my
                             x_tick1 = mx
                             x_tick2 = mx + tick_len
-                            pal.canvas.create_line(x_tick1, y_tick, x_tick2, y_tick, fill='navy', width=1, tags=('duct', f'hvac:{hvac_name}'))
-                            pal.canvas.create_text(x_tick2 + text_pad, y_tick, text=full_txt, fill='navy', font=('Arial', 9), anchor='w', tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_line(x_tick1, y_tick, x_tick2, y_tick, fill='darkgreen', width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick2 + text_pad, y_tick, text=full_txt, fill='darkgreen', font=('Arial', 9), anchor='w', tags=('duct', f'hvac:{hvac_name}'))
                     except Exception:
                         try:
                             pal.canvas.create_text(mx, my, text=label, fill='navy', font=('Arial', 10))
@@ -5413,20 +5511,20 @@ class ResizableRectApp:
                 y = fixed * spacing_px
                 x1, x2 = a * spacing_px, b * spacing_px
                 try:
-                    iid = pal.canvas.create_line(x1, y, x2, y, fill='blue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                    iid = pal.canvas.create_line(x1, y, x2, y, fill='darkgreen', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
                 except Exception:
                     try:
-                        pal.canvas.create_line(x1, y, x2, y, fill='blue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                        pal.canvas.create_line(x1, y, x2, y, fill='darkgreen', width=2, tags=('duct', f'hvac:{hvac_name}'))
                     except Exception:
                         pass
             else:
                 x = fixed * spacing_px
                 y1, y2 = a * spacing_px, b * spacing_px
                 try:
-                    iid = pal.canvas.create_line(x, y1, x, y2, fill='blue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                    iid = pal.canvas.create_line(x, y1, x, y2, fill='darkgreen', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
                 except Exception:
                     try:
-                        pal.canvas.create_line(x, y1, x, y2, fill='blue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                        pal.canvas.create_line(x, y1, x, y2, fill='darkgreen', width=2, tags=('duct', f'hvac:{hvac_name}'))
                     except Exception:
                         pass
 
@@ -6495,8 +6593,16 @@ class ResizableRectApp:
                         radius = 3
                 except Exception:
                     radius = 3
+                # tag the main_point with hvac name when available so it remains associated
+                main_tags = ('diffuser','main_point', f'diffuser_type:{kind}')
+                try:
+                    if hvac_name:
+                        # convert to tuple with hvac tag
+                        main_tags = tuple(list(main_tags) + [f'hvac:{hvac_name}'])
+                except Exception:
+                    pass
                 iid_new = canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius,
-                                             fill='red', outline='', tags=('diffuser','main_point', f'diffuser_type:{kind}'))
+                                             fill='red', outline='', tags=main_tags)
                 # create label next to it
                 try:
                     tid = canvas.create_text(cx + 8, cy, text=kind, anchor=tk.W, fill='black', font=('Arial', 8, 'bold'))
