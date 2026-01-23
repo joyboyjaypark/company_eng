@@ -4441,6 +4441,14 @@ class ResizableRectApp:
 
         load_btn = tk.Button(top_frame, text="불러오기", command=self.load_current)
         load_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Cloud storage buttons
+        cloud_upload_btn = tk.Button(top_frame, text="클라우드 업로드", command=self.cloud_upload_current)
+        cloud_upload_btn.pack(side=tk.LEFT, padx=5)
+        
+        cloud_browser_btn = tk.Button(top_frame, text="클라우드 브라우저", command=self.cloud_browser)
+        cloud_browser_btn.pack(side=tk.LEFT, padx=5)
+        
         # CSV preview/load button: opens a CSV and shows it in a new window as a table
         csv_btn = tk.Button(top_frame, text="CSV로드 (C)", command=self.load_csv_preview)
         csv_btn.pack(side=tk.LEFT, padx=5)
@@ -7838,6 +7846,46 @@ class ResizableRectApp:
                 rc.canvas.itemconfig(did, fill="red")
             except Exception:
                 pass
+    
+    def cloud_upload_current(self):
+        """현재 팔레트를 클라우드에 업로드"""
+        rc = self.get_current_palette()
+        if not rc:
+            messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
+            return
+        
+        # 임시 파일에 저장
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_file = os.path.join(temp_dir, "temp_palette.json")
+        
+        try:
+            data = rc.to_dict()
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            # 클라우드 업로드 다이얼로그 열기
+            from cloud_ui import CloudUploadDialog
+            dialog = CloudUploadDialog(self.root, file_path=temp_file, data_type="drawing")
+            self.root.wait_window(dialog)
+            
+            # 임시 파일 삭제
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+                
+        except Exception as e:
+            messagebox.showerror("오류", f"클라우드 업로드 준비 중 오류가 발생했습니다:\n{e}")
+    
+    def cloud_browser(self):
+        """클라우드 브라우저 열기"""
+        try:
+            from cloud_ui import CloudBrowserDialog
+            dialog = CloudBrowserDialog(self.root)
+            self.root.wait_window(dialog)
+        except Exception as e:
+            messagebox.showerror("오류", f"클라우드 브라우저를 여는 중 오류가 발생했습니다:\n{e}")
 
 
 if __name__ == "__main__":

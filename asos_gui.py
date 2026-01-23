@@ -234,8 +234,12 @@ class AsosGUI(tk.Tk):
         self.cancel_btn.state(['disabled'])
         self.excel_btn = ttk.Button(btn_frame, text="엑셀로 저장", command=self.export_to_excel)
         self.excel_btn.grid(row=0, column=4, padx=5)
+        self.cloud_upload_btn = ttk.Button(btn_frame, text="클라우드 업로드", command=self.cloud_upload_data)
+        self.cloud_upload_btn.grid(row=0, column=5, padx=5)
+        self.cloud_browser_btn = ttk.Button(btn_frame, text="클라우드 브라우저", command=self.cloud_browser)
+        self.cloud_browser_btn.grid(row=0, column=6, padx=5)
         self.quit_btn = ttk.Button(btn_frame, text="종료", command=self.destroy)
-        self.quit_btn.grid(row=0, column=5, padx=5)
+        self.quit_btn.grid(row=0, column=7, padx=5)
         row += 1
 
         self.status_var = tk.StringVar(value="진행: 0%")
@@ -980,6 +984,85 @@ class AsosGUI(tk.Tk):
         except Exception as e:
             messagebox.showerror("저장 실패", str(e))
             return
+    
+    def cloud_upload_data(self):
+        """현재 데이터를 클라우드에 업로드"""
+        cols = self.result_tree['columns']
+        if not cols:
+            messagebox.showinfo("정보", "업로드할 데이터가 없습니다. 먼저 조회를 실행하세요.")
+            return
+        
+        # 임시 엑셀 파일 생성
+        import tempfile
+        import os
+        
+        temp_dir = tempfile.gettempdir()
+        temp_file = os.path.join(temp_dir, "temp_weather_data.xlsx")
+        
+        try:
+            import openpyxl
+            from openpyxl.utils import get_column_letter
+        except Exception:
+            messagebox.showerror("패키지 필요", "openpyxl이 필요합니다. 설치: pip install openpyxl")
+            return
+        
+        try:
+            # 임시 파일에 저장
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = 'Weather Data'
+            
+            heading_map = {
+                'stnld': '지역번호',
+                'stnNm': '지역명',
+                'stnIds': '지점번호',
+                'rnum': '번호',
+                'year': '연도',
+                'month': '월',
+                'day': '일',
+                'hour': '시간',
+                'tm': '일시',
+                'ta': '건구온도 (℃DB)',
+                'hm': '상대습도 (%RH)',
+                'td': '이슬점온도',
+                'enthalpy_kcal': '엔탈피 (kcal/kg)',
+                'enthalpy_kj': '엔탈피 (kJ/kg)',
+            }
+            
+            # 헤더 작성
+            for i, c in enumerate(cols, start=1):
+                ws.cell(row=1, column=i, value=heading_map.get(c, c))
+            
+            # 데이터 작성
+            for r_idx, item_id in enumerate(self.result_tree.get_children(), start=2):
+                vals = self.result_tree.item(item_id, 'values')
+                for c_idx, v in enumerate(vals, start=1):
+                    ws.cell(row=r_idx, column=c_idx, value=v)
+            
+            wb.save(temp_file)
+            
+            # 클라우드 업로드 다이얼로그 열기
+            from cloud_ui import CloudUploadDialog
+            dialog = CloudUploadDialog(self, file_path=temp_file, data_type="weather_data")
+            self.wait_window(dialog)
+            
+            # 임시 파일 삭제
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+                
+        except Exception as e:
+            messagebox.showerror("오류", f"클라우드 업로드 준비 중 오류가 발생했습니다:\n{e}")
+    
+    def cloud_browser(self):
+        """클라우드 브라우저 열기"""
+        try:
+            from cloud_ui import CloudBrowserDialog
+            dialog = CloudBrowserDialog(self)
+            self.wait_window(dialog)
+        except Exception as e:
+            messagebox.showerror("오류", f"클라우드 브라우저를 여는 중 오류가 발생했습니다:\n{e}")
 
 
 if __name__ == "__main__":
