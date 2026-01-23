@@ -10,6 +10,7 @@ build/
 
 # Test files
 test_cloud_storage.py
+test_integration.py
 
 # IDE
 .vscode/
