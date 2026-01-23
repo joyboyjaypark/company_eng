@@ -4230,7 +4230,56 @@ class ResizableRectApp:
             self.sizing_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             self.sizing_scroll.pack(side=tk.LEFT, fill=tk.Y)
 
-            tk.Label(self.duct_branches_tab, text="두께 관련 설정이 여기에 들어갑니다.").pack(padx=8, pady=8)
+            # --- 두께(Thickness) tab UI ---
+            tab = self.duct_branches_tab
+            try:
+                # Label/font helpers
+                tk.Label(tab, text="두께 규칙 설정", font=("Arial", 10, "bold")).grid(row=0, column=0, columnspan=3, sticky='w', padx=6, pady=(6,4))
+
+                # Low-pressure rules (저압 규칙)
+                tk.Label(tab, text="저압 규칙:").grid(row=1, column=0, columnspan=3, sticky='w', padx=6)
+                low_defaults = [(0.6, 350), (0.8, 750), (1.0, 1500), (1.2, None)]
+                self._thk_low_pairs = []
+                prev_max = -1
+                for i, (thk, max_def) in enumerate(low_defaults):
+                    r = 2 + i
+                    l_thk = tk.Label(tab, text=f"{thk:.2f} mm", font=("Arial", 9))
+                    l_thk.grid(row=r, column=0, pady=2, sticky='w', padx=6)
+                    min_txt = "0~" if i == 0 else f"{int(prev_max)+1}~"
+                    l_min = tk.Label(tab, text=min_txt, width=8, font=("Arial", 9))
+                    l_min.grid(row=r, column=1, padx=4, pady=2, sticky='w')
+                    e_max = tk.Entry(tab, width=10)
+                    e_max.grid(row=r, column=2, pady=2, sticky='w')
+                    if max_def:
+                        e_max.insert(0, str(max_def))
+                        prev_max = max_def
+                    self._thk_low_pairs.append((l_thk, l_min, e_max))
+
+                # High-pressure rules (고압 규칙)
+                high_row = 2 + len(low_defaults)
+                tk.Label(tab, text="고압 규칙:").grid(row=high_row, column=0, columnspan=3, sticky='w', padx=6)
+                high_defaults = [(0.8, 450), (1.0, 1200), (1.2, None)]
+                self._thk_high_pairs = []
+                prev_max_h = -1
+                for i, (thk, max_def) in enumerate(high_defaults):
+                    r = high_row + 1 + i
+                    l_thk = tk.Label(tab, text=f"{thk:.2f} mm", font=("Arial", 9))
+                    l_thk.grid(row=r, column=0, pady=2, sticky='w', padx=6)
+                    min_txt = "0~" if i == 0 else f"{int(prev_max_h)+1}~"
+                    l_min = tk.Label(tab, text=min_txt, width=8, font=("Arial", 9))
+                    l_min.grid(row=r, column=1, padx=4, pady=2, sticky='w')
+                    e_max = tk.Entry(tab, width=10)
+                    e_max.grid(row=r, column=2, pady=2, sticky='w')
+                    if max_def:
+                        e_max.insert(0, str(max_def))
+                        prev_max_h = max_def
+                    self._thk_high_pairs.append((l_thk, l_min, e_max))
+
+                btn_row = high_row + 1 + len(high_defaults)
+                tk.Button(tab, text="두께별 소요량 계산", command=lambda: self._compute_thickness_breakdown()).grid(row=btn_row, column=0, columnspan=3, pady=8, sticky='w', padx=6)
+            except Exception:
+                # Fallback simple placeholder if grid fails for any reason
+                tk.Label(self.duct_branches_tab, text="두께 관련 설정이 여기에 들어갑니다.").pack(padx=8, pady=8)
             tk.Label(self.duct_check_tab, text="검사 관련 도구 및 결과가 여기에 표시됩니다.").pack(padx=8, pady=8)
         except Exception:
             # If ttk.Notebook not available for some reason, fallback to single area
@@ -4572,7 +4621,11 @@ class ResizableRectApp:
             self.sizing_text.insert(tk.END, f"균등 배분 실패: {e}\n")
 
     def _sizing_composite(self):
-        self.sizing_text.insert(tk.END, "종합 사이징 실행: 덕트 자동 라우팅을 시작합니다.\n")
+        # clear previous results so only current 종합 사이징 outputs remain
+        try:
+            self.sizing_text.delete('1.0', tk.END)
+        except Exception:
+            pass
         # Before running routing, normalize hvac_map so that no canvas id
         # appears in more than one mapping. This prevents cross-system mixing
         # caused by duplicated ids in multiple hvac entries.
@@ -4597,8 +4650,9 @@ class ResizableRectApp:
                         new_ids.add(iid_int)
                         assigned_global.add(iid_int)
                     if removed:
+                        # cleanup log disabled in UI result pane; enable for debugging by changing to print()
                         try:
-                            self.sizing_text.insert(tk.END, f"[CLEANUP] {name}: 중복 id 제거: {removed}\n")
+                            pass
                         except Exception:
                             pass
                     mapping['ids'] = new_ids
@@ -4613,11 +4667,51 @@ class ResizableRectApp:
             for name in list(self.hvac_map.keys()):
                 try:
                     self.auto_route_ducts(name)
-                    self.sizing_text.insert(tk.END, f"  - {name}: 라우팅 완료\n")
+                    # per-HVAC status messages suppressed in result text
                 except Exception as e:
-                    self.sizing_text.insert(tk.END, f"  - {name}: 라우팅 실패: {e}\n")
+                    # suppressed: routing failure message
+                    pass
         except Exception as e:
-            self.sizing_text.insert(tk.END, f"종합 사이징 오류: {e}\n")
+            # suppressed: overall sizing error message (logged to console instead)
+            try:
+                print("종합 사이징 오류:", e)
+            except Exception:
+                pass
+
+        # After routing, ensure supply duct items (darkgreen) and their labels are visible
+        try:
+            for name in list(self.hvac_map.keys()):
+                try:
+                    hv_tag = f'hvac:{name}'
+                    for p in getattr(self, 'palettes', []):
+                        try:
+                            # iterate over items tagged with hvac tag and set visible if supply-colored
+                            for iid in p.canvas.find_withtag(hv_tag):
+                                try:
+                                    tags = p.canvas.gettags(iid)
+                                except Exception:
+                                    tags = ()
+                                try:
+                                    ctype = p.canvas.type(iid)
+                                except Exception:
+                                    ctype = None
+                                try:
+                                    fill = p.canvas.itemcget(iid, 'fill') if ctype in ('oval', 'line', 'text') else ''
+                                except Exception:
+                                    fill = ''
+                                try:
+                                    if (('duct' in tags) and (fill in ('darkgreen', 'green'))):
+                                        p.canvas.itemconfigure(iid, state='normal')
+                                    if ctype == 'text' and fill in ('darkgreen', 'green'):
+                                        p.canvas.itemconfigure(iid, state='normal')
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def auto_route_ducts(self, hvac_name, max_add_steiner=30):
         """Auto-route ducts for the HVAC system named `hvac_name`.
@@ -4646,40 +4740,42 @@ class ResizableRectApp:
 
         # iterate palette(s) belonging to this hvac mapping and collect terminals
         # only collect items that belong to this hvac mapping (by id list and hvac tag or mapping palette)
-        try:
-            # diagnostic: list mapping ids and where they live (palette and tags)
+        # diag output disabled by default; enable for debugging by changing to `if True:` below
+        if False:
             try:
-                self.sizing_text.insert(tk.END, f"[DIAG] hvac mapping '{hvac_name}' ids (count={len(ids)}):\n")
-                for did in list(ids):
-                    try:
-                        did_int = int(did)
-                    except Exception:
-                        did_int = did
-                    found_pal = None
-                    found_name = None
-                    try:
-                        for p in getattr(self, 'palettes', []):
-                            try:
-                                if did_int in p.canvas.find_all():
-                                    found_pal = p
-                                    found_name = getattr(p, 'name', None) or repr(p)
-                                    break
-                            except Exception:
-                                continue
-                    except Exception:
-                        pass
-                    try:
-                        tags = found_pal.canvas.gettags(did_int) if found_pal is not None else ()
-                    except Exception:
-                        tags = ()
-                    try:
-                        self.sizing_text.insert(tk.END, f"  id={did_int} on={found_name} tags={tags}\n")
-                    except Exception:
-                        pass
+                # diagnostic: list mapping ids and where they live (palette and tags)
+                try:
+                    self.sizing_text.insert(tk.END, f"[DIAG] hvac mapping '{hvac_name}' ids (count={len(ids)}):\n")
+                    for did in list(ids):
+                        try:
+                            did_int = int(did)
+                        except Exception:
+                            did_int = did
+                        found_pal = None
+                        found_name = None
+                        try:
+                            for p in getattr(self, 'palettes', []):
+                                try:
+                                    if did_int in p.canvas.find_all():
+                                        found_pal = p
+                                        found_name = getattr(p, 'name', None) or repr(p)
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+                        try:
+                            tags = found_pal.canvas.gettags(did_int) if found_pal is not None else ()
+                        except Exception:
+                            tags = ()
+                        try:
+                            self.sizing_text.insert(tk.END, f"  id={did_int} on={found_name} tags={tags}\n")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             except Exception:
                 pass
-        except Exception:
-            pass
         for did in list(ids):
             try:
                 did_int = int(did)
@@ -5206,13 +5302,54 @@ class ResizableRectApp:
                 root_did = None
 
             s_segs, s_map = process_terminals(ts_supply, ti_supply, root_did=root_did)
-            # use only supply segments/flows — skip return processing per user request
-            duct_segments = set(s_segs)
-            seg_flow_map = dict(s_map)
+            # also run router for return partition (if any terminals)
+            try:
+                # choose a return root (prefer an 'inlet' among return terminals)
+                root_return_did = None
+                try:
+                    # prefer an explicit main_point tagged item for the return root
+                    for pal_t, did_t, ttype, cx_t, cy_t in ti_return:
+                        try:
+                            tags = pal_t.canvas.gettags(did_t)
+                        except Exception:
+                            tags = ()
+                        try:
+                            if 'main_point' in tags:
+                                root_return_did = did_t
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    root_return_did = None
+                if root_return_did is None:
+                    try:
+                        for pal_t, did_t, ttype, cx_t, cy_t in ti_return:
+                            try:
+                                if ttype == 'inlet':
+                                    root_return_did = did_t
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        root_return_did = None
+                try:
+                    if root_return_did is None and ti_return:
+                        root_return_did = ti_return[0][1]
+                except Exception:
+                    root_return_did = None
+
+                r_segs, r_map = process_terminals(ts_return, ti_return, root_did=root_return_did)
+            except Exception:
+                r_segs, r_map = [], {}
+            # combine segments for deletion/drawing, but keep maps separate for coloring
+            duct_segments = set(s_segs) | set(r_segs)
+            seg_flow_map_supply = dict(s_map)
+            seg_flow_map_return = dict(r_map)
         except Exception:
             # on error fallback to empty
             duct_segments = set()
-            seg_flow_map = {}
+            seg_flow_map_supply = {}
+            seg_flow_map_return = {}
 
         # sizing function (circular equivalent) - copy of calc formula
         def calc_circular_diameter_mm(q_m3h, dp_mm_per_m):
@@ -5363,20 +5500,22 @@ class ResizableRectApp:
                         except Exception:
                             flow_txt = f"{q:.0f} m3/h"
                         full_txt = f"{spec_txt}\n{flow_txt}"
+                        # default label color is darkgreen (supply); for return we'll redraw with skyblue below
+                        lbl_color = 'darkgreen'
                         if orient == 'H':
-                            # vertical tick at midpoint, text above the line
+                            # horizontal segment: draw short vertical tick above midpoint and place text above
                             x_tick = mx
-                            y_tick1 = my
-                            y_tick2 = my - tick_len
-                            pal.canvas.create_line(x_tick, y_tick1, x_tick, y_tick2, fill='darkgreen', width=1, tags=('duct', f'hvac:{hvac_name}'))
-                            pal.canvas.create_text(x_tick, y_tick2 - text_pad, text=full_txt, fill='darkgreen', font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
+                            y_base = my
+                            y_tick = my - tick_len
+                            pal.canvas.create_line(x_tick, y_base, x_tick, y_tick, fill=lbl_color, width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick, y_tick - text_pad, text=full_txt, fill=lbl_color, font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
                         else:
-                            # horizontal tick at midpoint, text to the right
+                            # vertical segment: draw short horizontal tick to the right of midpoint and place text to the right
                             y_tick = my
-                            x_tick1 = mx
-                            x_tick2 = mx + tick_len
-                            pal.canvas.create_line(x_tick1, y_tick, x_tick2, y_tick, fill='darkgreen', width=1, tags=('duct', f'hvac:{hvac_name}'))
-                            pal.canvas.create_text(x_tick2 + text_pad, y_tick, text=full_txt, fill='darkgreen', font=('Arial', 9), anchor='w', tags=('duct', f'hvac:{hvac_name}'))
+                            x_base = mx
+                            x_tick = mx + tick_len
+                            pal.canvas.create_line(x_base, y_tick, x_tick, y_tick, fill=lbl_color, width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick + text_pad, y_tick, text=full_txt, fill=lbl_color, font=('Arial', 9), anchor='w', tags=('duct', f'hvac:{hvac_name}'))
                     except Exception:
                         try:
                             pal.canvas.create_text(mx, my, text=label, fill='navy', font=('Arial', 10))
@@ -5387,16 +5526,96 @@ class ResizableRectApp:
         except Exception:
             pass
 
-        # Debug: print computed flows to sizing text for visibility
+        # compute total duct surface area for supply and return and write only quantities to result box
         try:
-            self.sizing_text.insert(tk.END, f"[DEBUG] seg_flow_map entries: {len(seg_flow_map)}\n")
-            if seg_flow_map:
-                for s, qv in seg_flow_map.items():
+            def compute_rect_wh_mm(q_val):
+                try:
+                    dp_val_local = float(self.sizing_pressure_entry.get() or 0.1)
+                except Exception:
+                    dp_val_local = 0.1
+                D_exact_local = calc_circular_diameter_mm(max(0.0, q_val), max(1e-6, dp_val_local))
+                try:
+                    r_raw_local = (self.sizing_ratio_cb.get() or "2")
+                    r_local = float(r_raw_local)
+                    if r_local <= 0:
+                        r_local = 2.0
+                except Exception:
+                    r_local = 2.0
+                if D_exact_local <= 0:
+                    return 0, 0
+                try:
+                    a_cont_l = (D_exact_local / 1.3) * ((1.0 + r_local) ** 0.25) / (r_local ** 0.625)
+                    b_cont_l = r_local * a_cont_l
+                except Exception:
+                    a_cont_l = D_exact_local / 1.3
+                    b_cont_l = a_cont_l * r_local
+                w_cont_l = max(a_cont_l, b_cont_l)
+                h_cont_l = min(a_cont_l, b_cont_l)
+                import math
+                def _floor50(x):
+                    v = math.floor(x / 50.0) * 50
+                    return int(max(50, v))
+                def _ceil50(x):
+                    v = math.ceil(x / 50.0) * 50
+                    return int(max(50, v))
+                w1_l = _floor50(w_cont_l)
+                h1_l = _floor50(h_cont_l)
+                def rect_to_circle(a_rect, b_rect):
                     try:
-                        self.sizing_text.insert(tk.END, f"  seg={s} -> {qv:.1f} m3/h\n")
+                        return 1.3 * (((a_rect * b_rect) ** 0.625) / ((a_rect + b_rect) ** 0.25))
                     except Exception:
-                        self.sizing_text.insert(tk.END, f"  seg={s} -> {qv}\n")
-            self.sizing_text.insert(tk.END, f"[DEBUG] terminal_flows (count={len(terminal_flows)}): {terminal_flows}\n")
+                        return 0.0
+                D1_l = rect_to_circle(w1_l, h1_l)
+                if D1_l >= D_exact_local:
+                    return int(w1_l), int(h1_l)
+                else:
+                    w2_l = _ceil50(w_cont_l)
+                    h2_l = h1_l
+                    D2_l = rect_to_circle(w2_l, h2_l)
+                    if D2_l >= D_exact_local:
+                        return int(w2_l), int(h2_l)
+                    else:
+                        h3_l = _ceil50(h_cont_l)
+                        w3_l = w2_l
+                        return int(w3_l), int(h3_l)
+
+            supply_area = 0.0
+            for seg, qv in seg_flow_map_supply.items():
+                try:
+                    orient, fixed, a, b = seg
+                    W_mm, H_mm = compute_rect_wh_mm(qv)
+                    if W_mm <= 0 or H_mm <= 0:
+                        continue
+                    W_m = float(W_mm) / 1000.0
+                    H_m = float(H_mm) / 1000.0
+                    length_m = abs(b - a) * grid_m
+                    supply_area += (W_m + H_m) * 2.0 * length_m
+                except Exception:
+                    continue
+
+            return_area = 0.0
+            for seg, qv in seg_flow_map_return.items():
+                try:
+                    orient, fixed, a, b = seg
+                    W_mm, H_mm = compute_rect_wh_mm(qv)
+                    if W_mm <= 0 or H_mm <= 0:
+                        continue
+                    W_m = float(W_mm) / 1000.0
+                    H_m = float(H_mm) / 1000.0
+                    length_m = abs(b - a) * grid_m
+                    return_area += (W_m + H_m) * 2.0 * length_m
+                except Exception:
+                    continue
+
+            try:
+                # only write quantities to the result text area
+                self.sizing_text.insert(tk.END, f"[QUANTITY] Supply total duct area: {supply_area:,.2f} m2 (segments={len(seg_flow_map_supply)})\n")
+                self.sizing_text.insert(tk.END, f"[QUANTITY] Return total duct area: {return_area:,.2f} m2 (segments={len(seg_flow_map_return)})\n")
+            except Exception:
+                try:
+                    print(f"Supply area: {supply_area:.2f} m2, Return area: {return_area:.2f} m2")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -5505,28 +5724,366 @@ class ResizableRectApp:
         except Exception:
             spacing_px = grid_m * getattr(pal, 'scale', 1.0)
 
-        for seg in duct_segments:
-            orient, fixed, a, b = seg
-            if orient == 'H':
-                y = fixed * spacing_px
-                x1, x2 = a * spacing_px, b * spacing_px
+        # draw supply segments first (base coords)
+        try:
+            for seg, q in list(seg_flow_map_supply.items()):
                 try:
-                    iid = pal.canvas.create_line(x1, y, x2, y, fill='darkgreen', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                    orient, fixed, a, b = seg
+                    if orient == 'H':
+                        y = fixed * spacing_px
+                        x1, x2 = a * spacing_px, b * spacing_px
+                        try:
+                            pal.canvas.create_line(x1, y, x2, y, fill='darkgreen', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                        except Exception:
+                            try:
+                                pal.canvas.create_line(x1, y, x2, y, fill='darkgreen', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                pass
+                    else:
+                        x = fixed * spacing_px
+                        y1, y2 = a * spacing_px, b * spacing_px
+                        try:
+                            pal.canvas.create_line(x, y1, x, y2, fill='darkgreen', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                        except Exception:
+                            try:
+                                pal.canvas.create_line(x, y1, x, y2, fill='darkgreen', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                pass
                 except Exception:
-                    try:
-                        pal.canvas.create_line(x1, y, x2, y, fill='darkgreen', width=2, tags=('duct', f'hvac:{hvac_name}'))
-                    except Exception:
-                        pass
-            else:
-                x = fixed * spacing_px
-                y1, y2 = a * spacing_px, b * spacing_px
+                    continue
+        except Exception:
+            pass
+
+        # draw supply labels (spec + flow) in darkgreen at midpoint
+        try:
+            for seg, q in list(seg_flow_map_supply.items()):
                 try:
-                    iid = pal.canvas.create_line(x, y1, x, y2, fill='darkgreen', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
-                except Exception:
+                    orient, fixed, a, b = seg
+                    if hasattr(pal, 'meter_to_pixel'):
+                        spacing_px = pal.meter_to_pixel(grid_m)
+                    else:
+                        spacing_px = grid_m * getattr(pal, 'scale', 1.0)
+                    if orient == 'H':
+                        y = fixed * spacing_px
+                        x1, x2 = a * spacing_px, b * spacing_px
+                        mx = (x1 + x2) / 2.0
+                        my = y
+                    else:
+                        x = fixed * spacing_px
+                        y1, y2 = a * spacing_px, b * spacing_px
+                        mx = x
+                        my = (y1 + y2) / 2.0
+
+                    # compute sizing for display (reuse same logic)
                     try:
-                        pal.canvas.create_line(x, y1, x, y2, fill='darkgreen', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                        dp_val = float(self.sizing_pressure_entry.get() or 0.1)
                     except Exception:
-                        pass
+                        dp_val = 0.1
+                    D_exact = calc_circular_diameter_mm(max(0.0, q), max(1e-6, dp_val))
+                    try:
+                        r_raw = (self.sizing_ratio_cb.get() or "2")
+                        r = float(r_raw)
+                        if r <= 0:
+                            r = 2.0
+                    except Exception:
+                        r = 2.0
+                    if D_exact > 0:
+                        try:
+                            a_cont = (D_exact / 1.3) * ((1.0 + r) ** 0.25) / (r ** 0.625)
+                            b_cont = r * a_cont
+                        except Exception:
+                            a_cont = D_exact / 1.3
+                            b_cont = a_cont * r
+                        w_cont = max(a_cont, b_cont)
+                        h_cont = min(a_cont, b_cont)
+                        import math
+                        def _floor50(x):
+                            v = math.floor(x / 50.0) * 50
+                            return int(max(50, v))
+                        def _ceil50(x):
+                            v = math.ceil(x / 50.0) * 50
+                            return int(max(50, v))
+                        w1 = _floor50(w_cont)
+                        h1 = _floor50(h_cont)
+                        def rect_to_circle(a_rect, b_rect):
+                            try:
+                                return 1.3 * (((a_rect * b_rect) ** 0.625) / ((a_rect + b_rect) ** 0.25))
+                            except Exception:
+                                return 0.0
+                        D1 = rect_to_circle(w1, h1)
+                        if D1 >= D_exact:
+                            w_final, h_final = w1, h1
+                        else:
+                            w2 = _ceil50(w_cont)
+                            h2 = h1
+                            D2 = rect_to_circle(w2, h2)
+                            if D2 >= D_exact:
+                                w_final, h_final = w2, h2
+                            else:
+                                h3 = _ceil50(h_cont)
+                                w3 = w2
+                                w_final, h_final = w3, h3
+                        W_lbl = int(w_final)
+                        H_lbl = int(h_final)
+                    else:
+                        W_lbl = 0
+                        H_lbl = 0
+
+                    try:
+                        spec_txt = f"{int(W_lbl):,} x {int(H_lbl):,} mm"
+                    except Exception:
+                        spec_txt = f"{W_lbl} x {H_lbl} mm"
+                    try:
+                        flow_txt = f"{q:,.0f} m3/h"
+                    except Exception:
+                        flow_txt = f"{q:.0f} m3/h"
+                    full_txt = f"{spec_txt}\n{flow_txt}"
+
+                    # draw tick and text
+                    try:
+                        tick_len = max(6, int(spacing_px * 0.08))
+                        text_pad = 6
+                        lbl_color = 'darkgreen'
+                        if orient == 'H':
+                            x_tick = mx
+                            y_base = my
+                            y_tick = my - tick_len
+                            pal.canvas.create_line(x_tick, y_base, x_tick, y_tick, fill=lbl_color, width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick, y_tick - text_pad, text=full_txt, fill=lbl_color, font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
+                        else:
+                            y_tick = my
+                            x_base = mx
+                            x_tick = mx + tick_len
+                            pal.canvas.create_line(x_base, y_tick, x_tick, y_tick, fill=lbl_color, width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick + text_pad, y_tick, text=full_txt, fill=lbl_color, font=('Arial', 9), anchor='w', tags=('duct', f'hvac:{hvac_name}'))
+                    except Exception:
+                        try:
+                            pal.canvas.create_text(mx, my, text=full_txt, fill='darkgreen', font=('Arial', 10))
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # helper to check interval overlap on grid indices
+        def _intervals_overlap(a1, b1, a2, b2):
+            try:
+                lo = max(min(a1, b1), min(a2, b2))
+                hi = min(max(a1, b1), max(a2, b2))
+                return lo < hi
+            except Exception:
+                return False
+
+        # draw return segments, offset if they overlap any supply segment on same line
+        try:
+            offset_px = max(4, int(spacing_px * 0.08))
+            for seg, q in list(seg_flow_map_return.items()):
+                try:
+                    orient, fixed, a, b = seg
+                    # detect overlap with any supply segment of same orient and fixed
+                    overlaps = False
+                    for sseg in seg_flow_map_supply.keys():
+                        try:
+                            sorient, sfixed, sa, sb = sseg
+                            if sorient == orient and sfixed == fixed:
+                                if _intervals_overlap(a, b, sa, sb):
+                                    overlaps = True
+                                    break
+                        except Exception:
+                            continue
+                    if orient == 'H':
+                        y = fixed * spacing_px
+                        x1, x2 = a * spacing_px, b * spacing_px
+                        y_draw = y + (offset_px if overlaps else 0)
+                        try:
+                            pal.canvas.create_line(x1, y_draw, x2, y_draw, fill='skyblue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                        except Exception:
+                            try:
+                                pal.canvas.create_line(x1, y_draw, x2, y_draw, fill='skyblue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                pass
+                        # if offset, add short vertical connectors at both ends to preserve connectivity
+                        if overlaps:
+                            try:
+                                pal.canvas.create_line(x1, y, x1, y_draw, fill='skyblue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                try:
+                                    pal.canvas.create_line(x1, y, x1, y_draw, fill='skyblue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                                except Exception:
+                                    pass
+                            try:
+                                pal.canvas.create_line(x2, y, x2, y_draw, fill='skyblue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                try:
+                                    pal.canvas.create_line(x2, y, x2, y_draw, fill='skyblue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                                except Exception:
+                                    pass
+                    else:
+                        x = fixed * spacing_px
+                        y1, y2 = a * spacing_px, b * spacing_px
+                        x_draw = x + (offset_px if overlaps else 0)
+                        try:
+                            pal.canvas.create_line(x_draw, y1, x_draw, y2, fill='skyblue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                        except Exception:
+                            try:
+                                pal.canvas.create_line(x_draw, y1, x_draw, y2, fill='skyblue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                pass
+                        # if offset, add short horizontal connectors at both ends to preserve connectivity
+                        if overlaps:
+                            try:
+                                pal.canvas.create_line(x, y1, x_draw, y1, fill='skyblue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                try:
+                                    pal.canvas.create_line(x, y1, x_draw, y1, fill='skyblue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                                except Exception:
+                                    pass
+                            try:
+                                pal.canvas.create_line(x, y2, x_draw, y2, fill='skyblue', width=max(2, int(2 * getattr(pal, 'canvas_scale', 1.0))), tags=('duct', f'hvac:{hvac_name}'))
+                            except Exception:
+                                try:
+                                    pal.canvas.create_line(x, y2, x_draw, y2, fill='skyblue', width=2, tags=('duct', f'hvac:{hvac_name}'))
+                                except Exception:
+                                    pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # draw return labels (spec + flow) in skyblue at midpoint/offset
+        try:
+            for seg, q in list(seg_flow_map_return.items()):
+                try:
+                    orient, fixed, a, b = seg
+                    if hasattr(pal, 'meter_to_pixel'):
+                        spacing_px = pal.meter_to_pixel(grid_m)
+                    else:
+                        spacing_px = grid_m * getattr(pal, 'scale', 1.0)
+                    if orient == 'H':
+                        y = fixed * spacing_px
+                        x1, x2 = a * spacing_px, b * spacing_px
+                        mx = (x1 + x2) / 2.0
+                        # determine if this seg was offset (check against supply overlap)
+                        overlaps = False
+                        for sseg in seg_flow_map_supply.keys():
+                            try:
+                                sorient, sfixed, sa, sb = sseg
+                                if sorient == orient and sfixed == fixed and _intervals_overlap(a, b, sa, sb):
+                                    overlaps = True
+                                    break
+                            except Exception:
+                                continue
+                        y_draw = y + (max(4, int(spacing_px * 0.08)) if overlaps else 0)
+                        my = y_draw
+                    else:
+                        x = fixed * spacing_px
+                        y1, y2 = a * spacing_px, b * spacing_px
+                        mx = x
+                        my = (y1 + y2) / 2.0
+                        overlaps = False
+                        for sseg in seg_flow_map_supply.keys():
+                            try:
+                                sorient, sfixed, sa, sb = sseg
+                                if sorient == orient and sfixed == fixed and _intervals_overlap(a, b, sa, sb):
+                                    overlaps = True
+                                    break
+                            except Exception:
+                                continue
+                        x_draw = x + (max(4, int(spacing_px * 0.08)) if overlaps else 0)
+                        mx = x_draw
+
+                    # compute sizing for display
+                    try:
+                        dp_val = float(self.sizing_pressure_entry.get() or 0.1)
+                    except Exception:
+                        dp_val = 0.1
+                    D_exact = calc_circular_diameter_mm(max(0.0, q), max(1e-6, dp_val))
+                    try:
+                        r_raw = (self.sizing_ratio_cb.get() or "2")
+                        r = float(r_raw)
+                        if r <= 0:
+                            r = 2.0
+                    except Exception:
+                        r = 2.0
+                    if D_exact > 0:
+                        try:
+                            a_cont = (D_exact / 1.3) * ((1.0 + r) ** 0.25) / (r ** 0.625)
+                            b_cont = r * a_cont
+                        except Exception:
+                            a_cont = D_exact / 1.3
+                            b_cont = a_cont * r
+                        w_cont = max(a_cont, b_cont)
+                        h_cont = min(a_cont, b_cont)
+                        import math
+                        def _floor50(x):
+                            v = math.floor(x / 50.0) * 50
+                            return int(max(50, v))
+                        def _ceil50(x):
+                            v = math.ceil(x / 50.0) * 50
+                            return int(max(50, v))
+                        w1 = _floor50(w_cont)
+                        h1 = _floor50(h_cont)
+                        def rect_to_circle(a_rect, b_rect):
+                            try:
+                                return 1.3 * (((a_rect * b_rect) ** 0.625) / ((a_rect + b_rect) ** 0.25))
+                            except Exception:
+                                return 0.0
+                        D1 = rect_to_circle(w1, h1)
+                        if D1 >= D_exact:
+                            w_final, h_final = w1, h1
+                        else:
+                            w2 = _ceil50(w_cont)
+                            h2 = h1
+                            D2 = rect_to_circle(w2, h2)
+                            if D2 >= D_exact:
+                                w_final, h_final = w2, h2
+                            else:
+                                h3 = _ceil50(h_cont)
+                                w3 = w2
+                                w_final, h_final = w3, h3
+                        W_lbl = int(w_final)
+                        H_lbl = int(h_final)
+                    else:
+                        W_lbl = 0
+                        H_lbl = 0
+
+                    try:
+                        spec_txt = f"{int(W_lbl):,} x {int(H_lbl):,} mm"
+                    except Exception:
+                        spec_txt = f"{W_lbl} x {H_lbl} mm"
+                    try:
+                        flow_txt = f"{q:,.0f} m3/h"
+                    except Exception:
+                        flow_txt = f"{q:.0f} m3/h"
+                    full_txt = f"{spec_txt}\n{flow_txt}"
+
+                    # draw tick and text
+                    try:
+                        tick_len = max(6, int(spacing_px * 0.08))
+                        text_pad = 6
+                        lbl_color = 'skyblue'
+                        if orient == 'H':
+                            x_tick = mx
+                            y_base = my
+                            y_tick = my - tick_len
+                            pal.canvas.create_line(x_tick, y_base, x_tick, y_tick, fill=lbl_color, width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick, y_tick - text_pad, text=full_txt, fill=lbl_color, font=('Arial', 9), anchor='s', tags=('duct', f'hvac:{hvac_name}'))
+                        else:
+                            y_tick = my
+                            x_base = mx
+                            x_tick = mx + tick_len
+                            pal.canvas.create_line(x_base, y_tick, x_tick, y_tick, fill=lbl_color, width=1, tags=('duct', f'hvac:{hvac_name}'))
+                            pal.canvas.create_text(x_tick + text_pad, y_tick, text=full_txt, fill=lbl_color, font=('Arial', 9), anchor='w', tags=('duct', f'hvac:{hvac_name}'))
+                    except Exception:
+                        try:
+                            pal.canvas.create_text(mx, my, text=full_txt, fill='skyblue', font=('Arial', 10))
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
         return True
 
@@ -5541,6 +6098,41 @@ class ResizableRectApp:
 
     def _sizing_auto(self):
         self.sizing_text.insert(tk.END, "자동완성 수행(플레이스홀더)\n")
+    
+    def _compute_thickness_breakdown(self):
+        # Read the low/high pressure rule entries and display a simple summary
+        try:
+            lines = []
+            lines.append("두께별 소요량 계산 시작:\n")
+            try:
+                low_pairs = getattr(self, '_thk_low_pairs', [])
+                lines.append("[저압 규칙]")
+                for tpl in low_pairs:
+                    l_thk, l_min, e_max = tpl
+                    min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else ''
+                    max_txt = e_max.get() if e_max else ''
+                    lines.append(f"{l_thk.cget('text')} : {min_txt} -> {max_txt}")
+            except Exception:
+                pass
+            try:
+                high_pairs = getattr(self, '_thk_high_pairs', [])
+                lines.append('\n[고압 규칙]')
+                for tpl in high_pairs:
+                    l_thk, l_min, e_max = tpl
+                    min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else ''
+                    max_txt = e_max.get() if e_max else ''
+                    lines.append(f"{l_thk.cget('text')} : {min_txt} -> {max_txt}")
+            except Exception:
+                pass
+            try:
+                self.sizing_text.insert(tk.END, "\n".join(lines) + "\n")
+            except Exception:
+                print("두께 규칙:\n" + "\n".join(lines))
+        except Exception as e:
+            try:
+                self.sizing_text.insert(tk.END, f"두께 계산 오류: {e}\n")
+            except Exception:
+                print("두께 계산 오류:", e)
         
     def _on_calc_supply_flow(self):
         rc = self.get_current_palette()
