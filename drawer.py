@@ -7603,6 +7603,171 @@ class ResizableRectApp:
             final_header.append(f"Table_{i}_Title")
             final_header.append(f"Table_{i}_Value")
 
+        # --- Show preview window with multiple tabs (like Excel sheets): pivot + per-room tabs ---
+        try:
+            pv = tk.Toplevel(self.root)
+            pv.title("장비일람표 미리보기")
+            pv.geometry("1000x520")
+
+            from tkinter import ttk
+            nb = ttk.Notebook(pv)
+            nb.pack(fill=tk.BOTH, expand=True)
+
+            # Prepare room maps (title->value) and orders
+            rooms = []
+            room_maps = []
+            room_title_orders = []
+            for r in export_rows[1:]:
+                try:
+                    base = r[:8]
+                    room_name = str(base[0]) if base and base[0] is not None else ''
+                    rooms.append(room_name)
+                    tlist = r[8] if len(r) > 8 else []
+                    m = {}
+                    order = []
+                    for (t0, v0) in (tlist or []):
+                        key = str(t0)
+                        if key not in m:
+                            order.append(key)
+                        m[key] = str(v0)
+                    room_maps.append(m)
+                    room_title_orders.append(order)
+                except Exception:
+                    rooms.append('')
+                    room_maps.append({})
+                    room_title_orders.append([])
+
+            # global title ordering
+            global_titles = []
+            seen = set()
+            for order in room_title_orders:
+                for t in order:
+                    if t not in seen:
+                        seen.add(t)
+                        global_titles.append(t)
+
+            # Pivot tab
+            pivot_frame = tk.Frame(nb)
+            nb.add(pivot_frame, text='Pivot')
+
+            pivot_fr = tk.Frame(pivot_frame)
+            pivot_fr.pack(fill=tk.BOTH, expand=True)
+
+            # Treeview for pivot
+            pivot_cols = ['항목'] + rooms
+            tree = ttk.Treeview(pivot_fr, columns=[f"c{i}" for i in range(len(pivot_cols))], show='headings')
+            for i, h in enumerate(pivot_cols):
+                tree.heading(f"c{i}", text=h)
+                tree.column(f"c{i}", width=160 if i == 0 else 120, anchor='w')
+
+            vsb = ttk.Scrollbar(pivot_fr, orient=tk.VERTICAL, command=tree.yview)
+            hsb = ttk.Scrollbar(pivot_fr, orient=tk.HORIZONTAL, command=tree.xview)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            tree.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            pivot_fr.rowconfigure(0, weight=1)
+            pivot_fr.columnconfigure(0, weight=1)
+
+            # First row: 공간이름
+            try:
+                tree.insert('', tk.END, values=['공간이름'] + rooms)
+            except Exception:
+                pass
+
+            for title in global_titles:
+                rowvals = [title]
+                for rm in room_maps:
+                    rowvals.append(rm.get(title, ''))
+                try:
+                    tree.insert('', tk.END, values=rowvals)
+                except Exception:
+                    continue
+
+            # Group tabs by equipment type (hvac_detail_text if present else hvac_text/unknown)
+            equip_groups = {}
+            # determine equipment label per room from export_rows (parallel to rooms list)
+            for i, r in enumerate(export_rows[1:]):
+                try:
+                    equip_label = r[2] if len(r) > 2 and r[2] else ''
+                except Exception:
+                    equip_label = ''
+                if not equip_label:
+                    # fallback to hvac text or generic
+                    try:
+                        equip_label = r[5] if len(r) > 5 and r[5] else ''
+                    except Exception:
+                        equip_label = ''
+                if not equip_label:
+                    equip_label = 'Unknown'
+                equip_groups.setdefault(equip_label, []).append(i)
+
+            # create one tab per equipment type
+            for equip_label, idx_list in equip_groups.items():
+                try:
+                    gf = tk.Frame(nb)
+                    nb.add(gf, text=equip_label)
+                    gfr = tk.Frame(gf)
+                    gfr.pack(fill=tk.BOTH, expand=True)
+
+                    # collect group room names and maps
+                    g_rooms = [rooms[i] for i in idx_list]
+                    g_maps = [room_maps[i] for i in idx_list]
+                    g_orders = [room_title_orders[i] for i in idx_list]
+
+                    # determine group titles order
+                    g_titles = []
+                    seen_g = set()
+                    for ordl in g_orders:
+                        for t in ordl:
+                            if t not in seen_g:
+                                seen_g.add(t)
+                                g_titles.append(t)
+
+                    # Treeview for this equipment group: pivoted
+                    cols = ['항목'] + g_rooms
+                    tv = ttk.Treeview(gfr, columns=[f"c{i}" for i in range(len(cols))], show='headings')
+                    for i, h in enumerate(cols):
+                        tv.heading(f"c{i}", text=h)
+                        tv.column(f"c{i}", width=160 if i == 0 else 120, anchor='w')
+
+                    vs = ttk.Scrollbar(gfr, orient=tk.VERTICAL, command=tv.yview)
+                    hs = ttk.Scrollbar(gfr, orient=tk.HORIZONTAL, command=tv.xview)
+                    tv.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+                    tv.grid(row=0, column=0, sticky='nsew')
+                    vs.grid(row=0, column=1, sticky='ns')
+                    hs.grid(row=1, column=0, sticky='ew')
+                    gfr.rowconfigure(0, weight=1)
+                    gfr.columnconfigure(0, weight=1)
+
+                    # first row: 공간이름
+                    try:
+                        tv.insert('', tk.END, values=['공간이름'] + g_rooms)
+                    except Exception:
+                        pass
+
+                    # rows: group titles
+                    for t in g_titles:
+                        rowvals = [t]
+                        for gm in g_maps:
+                            rowvals.append(gm.get(t, ''))
+                        try:
+                            tv.insert('', tk.END, values=rowvals)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # buttons area
+            btnf = tk.Frame(pv)
+            btnf.pack(fill=tk.X, pady=6)
+            exp_btn = tk.Button(btnf, text="Export (저장)...", command=lambda: pv.destroy())
+            exp_btn.pack(side=tk.LEFT, padx=8)
+            close_btn = tk.Button(btnf, text="Close", command=pv.destroy)
+            close_btn.pack(side=tk.RIGHT, padx=8)
+        except Exception:
+            pass
+
         # Ask user where to save .xlsx
         from tkinter import filedialog
         fp = filedialog.asksaveasfilename(parent=self.root, defaultextension='.xlsx', filetypes=[('Excel files', '*.xlsx'), ('All files', '*.*')], title='장비일람표 저장 (.xlsx)')
