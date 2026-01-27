@@ -4670,6 +4670,71 @@ class ResizableRectApp:
         except Exception:
             pass
 
+            # Additional normalization: ensure ids in each mapping are present and
+            # actually belong to that HVAC (either located on the mapping's palette
+            # or explicitly tagged with hvac:<name>). Clean up inconsistent hvac tags
+            # from items that were moved/removed to avoid ghost associations.
+            try:
+                for name in list(self.hvac_map.keys()):
+                    try:
+                        mapping = self.hvac_map.get(name)
+                        if not mapping or not isinstance(mapping, dict):
+                            continue
+                        pal = mapping.get('palette')
+                        orig_ids = set(mapping.get('ids', set()) or set())
+                        keep_ids = set()
+                        for iid in orig_ids:
+                            try:
+                                iid_int = int(iid)
+                            except Exception:
+                                iid_int = iid
+                            # locate item on any palette
+                            found_pal = None
+                            for p in getattr(self, 'palettes', []):
+                                try:
+                                    if iid_int in p.canvas.find_all():
+                                        found_pal = p
+                                        break
+                                except Exception:
+                                    continue
+                            # if not found on any palette, skip
+                            if not found_pal:
+                                # also remove any hvac tag lingering elsewhere
+                                try:
+                                    for p in getattr(self, 'palettes', []):
+                                        try:
+                                            if iid_int in p.canvas.find_all():
+                                                try:
+                                                    p.canvas.dtag(iid_int, f'hvac:{name}')
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    pass
+                                continue
+                            try:
+                                tags = found_pal.canvas.gettags(iid_int)
+                            except Exception:
+                                tags = ()
+                            # Accept if explicitly tagged for this hvac, or if it lives on the mapping palette
+                            if f'hvac:{name}' in tags or (pal is not None and found_pal is pal):
+                                keep_ids.add(iid_int)
+                            else:
+                                # item belongs elsewhere and is not tagged for this hvac; remove any hvac tag for this name
+                                try:
+                                    found_pal.canvas.dtag(iid_int, f'hvac:{name}')
+                                except Exception:
+                                    pass
+                                # do not keep
+                                continue
+                        mapping['ids'] = keep_ids
+                        self.hvac_map[name] = mapping
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
         # run router for every HVAC system recorded
         try:
             for name in list(self.hvac_map.keys()):
@@ -6110,32 +6175,260 @@ class ResizableRectApp:
     def _compute_thickness_breakdown(self):
         # Read the low/high pressure rule entries and display a simple summary
         try:
-            lines = []
-            lines.append("두께별 소요량 계산 시작:\n")
+            # Build a table of duct segments: HVAC | Line Type | Size WxH | Length (m) | Area (m2)
+            rows = []
             try:
-                low_pairs = getattr(self, '_thk_low_pairs', [])
-                lines.append("[저압 규칙]")
-                for tpl in low_pairs:
-                    l_thk, l_min, e_max = tpl
-                    min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else ''
-                    max_txt = e_max.get() if e_max else ''
-                    lines.append(f"{l_thk.cget('text')} : {min_txt} -> {max_txt}")
+                for pal in getattr(self, 'palettes', []):
+                    try:
+                        canvas = pal.canvas
+                        # collect duct items on this palette
+                        duct_items = list(canvas.find_withtag('duct'))
+                        # separate lines and texts for matching
+                        line_items = [iid for iid in duct_items if canvas.type(iid) == 'line']
+                        text_items = [iid for iid in duct_items if canvas.type(iid) == 'text']
+
+                        # helper: parse size from a text string like '1,000 x 500 mm' or '1,000 x 500 mm\n123 m3/h'
+                        import re
+                        def parse_size(txt):
+                            try:
+                                # take first line and normalize common variants
+                                first = str(txt).split('\n', 1)[0]
+                                # normalize multiplication sign variants and remove NBSPs
+                                first = first.replace('\u00D7', 'x').replace('×', 'x').replace('\u00A0', ' ')
+                                # allow comma thousand separators and optional decimals
+                                m = re.search(r"([\d,]+(?:\.[\d]+)?)\s*[xX]\s*([\d,]+(?:\.[\d]+)?)\s*mm", first)
+                                if m:
+                                    g1 = m.group(1).replace(',', '')
+                                    g2 = m.group(2).replace(',', '')
+                                    try:
+                                        w = float(g1)
+                                        h = float(g2)
+                                    except Exception:
+                                        return None, None, None
+                                    # present as integer mm where possible
+                                    try:
+                                        w_int = int(round(w))
+                                        h_int = int(round(h))
+                                        size_out = f"{w_int:,} x {h_int:,} mm"
+                                    except Exception:
+                                        size_out = f"{w} x {h} mm"
+                                    return size_out, float(w) / 1000.0, float(h) / 1000.0
+                            except Exception:
+                                pass
+                            return None, None, None
+
+                        # precompute text coords and parsed sizes
+                        text_info = {}
+                        for tid in text_items:
+                            try:
+                                ttext = canvas.itemcget(tid, 'text')
+                                tags = canvas.gettags(tid)
+                                coords = canvas.coords(tid)
+                                size_str, w_m, h_m = parse_size(ttext)
+                                text_info[tid] = {'text': ttext, 'tags': tags, 'coords': coords, 'size_str': size_str, 'w_m': w_m, 'h_m': h_m}
+                            except Exception:
+                                continue
+
+                        # for each line, find matching text (same hvac tag) nearest to midpoint
+                        for lid in line_items:
+                            try:
+                                coords = canvas.coords(lid)
+                                if not coords or len(coords) < 4:
+                                    continue
+                                x1, y1, x2, y2 = coords[0], coords[1], coords[-2], coords[-1]
+                                mx = (x1 + x2) / 2.0
+                                my = (y1 + y2) / 2.0
+                                # length in pixels -> meters
+                                import math
+                                length_px = math.hypot(x2 - x1, y2 - y1)
+                                try:
+                                    length_m = pal.pixel_to_meter(length_px)
+                                except Exception:
+                                    length_m = length_px / getattr(pal, 'scale', 1.0)
+                                tags = canvas.gettags(lid)
+                                hv_tags = [t for t in tags if isinstance(t, str) and t.startswith('hvac:')]
+                                hv_name = hv_tags[0].split(':', 1)[1] if hv_tags else '<unknown>'
+                                # determine line type by fill color
+                                try:
+                                    fill = canvas.itemcget(lid, 'fill')
+                                except Exception:
+                                    fill = ''
+                                if fill in ('darkgreen', 'green'):
+                                    line_type = 'Supply'
+                                elif fill in ('skyblue', 'lightblue'):
+                                    line_type = 'Return'
+                                else:
+                                    line_type = 'Duct'
+
+                                # Prefer texts tagged for the same HVAC, but fall back to any nearby text
+                                candidates = []
+                                if hv_name == '<unknown>':
+                                    candidates = list(text_info.items())
+                                else:
+                                    candidates = [(tid, info) for tid, info in text_info.items() if f'hvac:{hv_name}' in (info.get('tags') or ())]
+                                    if not candidates:
+                                        # fallback to all texts when no hvac-tagged texts exist
+                                        candidates = list(text_info.items())
+
+                                best = None
+                                best_d = None
+                                for tid, info in candidates:
+                                    try:
+                                        tcoords = info.get('coords') or []
+                                        if not tcoords or len(tcoords) < 2:
+                                            continue
+                                        # compute text center
+                                        if len(tcoords) >= 4:
+                                            tx = (tcoords[0] + tcoords[2]) / 2.0
+                                            ty = (tcoords[1] + tcoords[3]) / 2.0
+                                        else:
+                                            tx = tcoords[0]
+                                            ty = tcoords[1]
+
+                                        # compute perpendicular distance from (tx,ty) to line segment (x1,y1)-(x2,y2)
+                                        vx = x2 - x1
+                                        vy = y2 - y1
+                                        wx = tx - x1
+                                        wy = ty - y1
+                                        seg_len2 = vx*vx + vy*vy
+                                        if seg_len2 == 0:
+                                            proj = 0.0
+                                        else:
+                                            proj = (wx*vx + wy*vy) / seg_len2
+                                        if proj < 0.0:
+                                            closest_x, closest_y = x1, y1
+                                        elif proj > 1.0:
+                                            closest_x, closest_y = x2, y2
+                                        else:
+                                            closest_x = x1 + proj * vx
+                                            closest_y = y1 + proj * vy
+                                        dx = tx - closest_x
+                                        dy = ty - closest_y
+                                        dist = (dx*dx + dy*dy) ** 0.5
+                                        if best_d is None or dist < best_d:
+                                            best_d = dist
+                                            best = info
+                                    except Exception:
+                                        continue
+
+                                size_str = ''
+                                w_m = None
+                                h_m = None
+                                # threshold: within 0.2m or 20px whichever is larger
+                                try:
+                                    thresh_px = max(20.0, pal.meter_to_pixel(0.2))
+                                except Exception:
+                                    thresh_px = 20.0
+                                if best and best_d is not None and best_d <= thresh_px:
+                                    size_str = best.get('size_str') or ''
+                                    w_m = best.get('w_m')
+                                    h_m = best.get('h_m')
+
+                                # compute area (m2) as perimeter * length: (W + H) * 2 * length
+                                area_m2 = None
+                                if w_m and h_m and length_m is not None:
+                                    try:
+                                        area_m2 = (w_m + h_m) * 2.0 * float(length_m)
+                                    except Exception:
+                                        area_m2 = None
+
+                                # store palette and line id along with display values for precise mapping
+                                rows.append((hv_name, line_type, size_str or 'N/A', round(length_m, 3), round(area_m2 or 0.0, 3), pal, lid))
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
             except Exception:
-                pass
+                rows = []
+
+            # create popup window with Treeview
             try:
-                high_pairs = getattr(self, '_thk_high_pairs', [])
-                lines.append('\n[고압 규칙]')
-                for tpl in high_pairs:
-                    l_thk, l_min, e_max = tpl
-                    min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else ''
-                    max_txt = e_max.get() if e_max else ''
-                    lines.append(f"{l_thk.cget('text')} : {min_txt} -> {max_txt}")
-            except Exception:
-                pass
-            try:
-                self.sizing_text.insert(tk.END, "\n".join(lines) + "\n")
-            except Exception:
-                print("두께 규칙:\n" + "\n".join(lines))
+                win = tk.Toplevel(self.root)
+                win.title('덕트 물량 상세')
+                win.geometry('800x400')
+                cols = ('HVAC', 'Line', 'Size', 'Length(m)', 'Area(m2)')
+                tv = ttk.Treeview(win, columns=cols, show='headings')
+                for c in cols:
+                    tv.heading(c, text=c)
+                    tv.column(c, width=120 if c != 'Size' else 160, anchor=tk.W)
+                tv.pack(fill=tk.BOTH, expand=True)
+                # insert rows and remember mapping from tree item -> (palette, line id)
+                row_map = {}
+                for r in rows:
+                    try:
+                        # rows entries were appended as (hv_name, line_type, size_str, length_m, area_m2, pal, lid)
+                        hv, ltype, size_s, length_v, area_v, pal_obj, lid_obj = r
+                        display_vals = (hv, ltype, size_s, length_v, area_v)
+                        iid = tv.insert('', tk.END, values=display_vals)
+                        row_map[iid] = (pal_obj, lid_obj)
+                    except Exception:
+                        continue
+                # add simple close button
+                # highlight state
+                current_highlight = {'pal': None, 'item': None, 'orig_opts': None}
+
+                def clear_highlight():
+                    hp = current_highlight.get('pal')
+                    hi = current_highlight.get('item')
+                    orig = current_highlight.get('orig_opts')
+                    if hp and hi and orig:
+                        try:
+                            # restore original options
+                            try:
+                                hp.canvas.itemconfigure(hi, fill=orig.get('fill', ''), width=orig.get('width', 1))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    current_highlight['pal'] = None
+                    current_highlight['item'] = None
+                    current_highlight['orig_opts'] = None
+
+                def on_select(event):
+                    try:
+                        sel = tv.selection()
+                        if not sel:
+                            clear_highlight()
+                            return
+                        iid = sel[0]
+                        pair = row_map.get(iid)
+                        if not pair:
+                            clear_highlight()
+                            return
+                        pal, lid = pair
+                        if pal is None or lid is None:
+                            clear_highlight()
+                            return
+                        # clear previous
+                        clear_highlight()
+                        try:
+                            orig_fill = pal.canvas.itemcget(lid, 'fill')
+                        except Exception:
+                            orig_fill = ''
+                        try:
+                            orig_width = pal.canvas.itemcget(lid, 'width')
+                        except Exception:
+                            orig_width = 1
+                        current_highlight['pal'] = pal
+                        current_highlight['item'] = lid
+                        current_highlight['orig_opts'] = {'fill': orig_fill, 'width': orig_width}
+                        try:
+                            pal.canvas.itemconfigure(lid, fill='orange', width=max(3, int(float(orig_width) * 2)))
+                            # bring to front
+                            pal.canvas.tag_raise(lid)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                tv.bind('<<TreeviewSelect>>', on_select)
+                btn = tk.Button(win, text='닫기', command=lambda: (clear_highlight(), win.destroy()))
+                btn.pack(pady=6)
+            except Exception as e:
+                try:
+                    self.sizing_text.insert(tk.END, f"두께별 창 생성 오류: {e}\n")
+                except Exception:
+                    print("두께별 창 생성 오류:", e)
         except Exception as e:
             try:
                 self.sizing_text.insert(tk.END, f"두께 계산 오류: {e}\n")
@@ -6216,6 +6509,16 @@ class ResizableRectApp:
                                             pal.canvas.delete(iid_int)
                                         except Exception:
                                             pass
+                                    # delete items tagged with this hvac key (includes this system's flow labels)
+                                    try:
+                                        hv_tag = f'hvac:{key}'
+                                        for it in list(pal.canvas.find_withtag(hv_tag)):
+                                            try:
+                                                pal.canvas.delete(it)
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
                             except Exception:
                                 # ignore errors when querying/deleting this item
                                 pass
@@ -6495,6 +6798,68 @@ class ResizableRectApp:
                                     pass
                             except Exception:
                                 pass
+                            # additionally, remove hvac tag and any nearby main_point_flow labels
+                            try:
+                                for rem in ids:
+                                    try:
+                                        # try int conversion
+                                        try:
+                                            rem_int = int(rem)
+                                        except Exception:
+                                            rem_int = rem
+                                        if other_palette is None:
+                                            continue
+                                        # remove hvac tag from the specific item if present
+                                        try:
+                                            other_palette.canvas.dtag(rem_int, f'hvac:{oname}')
+                                        except Exception:
+                                            pass
+                                        # if the removed item exists on the other palette, try to delete nearby main_point_flow labels
+                                        try:
+                                            if rem_int in other_palette.canvas.find_all():
+                                                coords = other_palette.canvas.coords(rem_int)
+                                                if coords and len(coords) >= 2:
+                                                    if len(coords) >= 4:
+                                                        cx = (coords[0] + coords[2]) / 2.0
+                                                        cy = (coords[1] + coords[3]) / 2.0
+                                                    else:
+                                                        cx = coords[0]
+                                                        cy = coords[1]
+                                                    # scan hvac-tagged items for main_point_flow near this point
+                                                    try:
+                                                        for it in list(other_palette.canvas.find_withtag(f'hvac:{oname}')):
+                                                            try:
+                                                                tgs = other_palette.canvas.gettags(it)
+                                                            except Exception:
+                                                                tgs = ()
+                                                            if 'main_point_flow' not in tgs:
+                                                                continue
+                                                            try:
+                                                                c2 = other_palette.canvas.coords(it)
+                                                                if not c2 or len(c2) < 2:
+                                                                    continue
+                                                                if len(c2) >= 4:
+                                                                    ix = (c2[0] + c2[2]) / 2.0
+                                                                    iy = (c2[1] + c2[3]) / 2.0
+                                                                else:
+                                                                    ix = c2[0]
+                                                                    iy = c2[1]
+                                                                # distance threshold in pixels (approx); remove only very close labels
+                                                                if abs(ix - cx) <= 24 and abs(iy - cy) <= 24:
+                                                                    try:
+                                                                        other_palette.canvas.delete(it)
+                                                                    except Exception:
+                                                                        pass
+                                                            except Exception:
+                                                                continue
+                                                    except Exception:
+                                                        pass
+                                        except Exception:
+                                            pass
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
                         except Exception:
                             continue
             except Exception:
@@ -6565,6 +6930,16 @@ class ResizableRectApp:
                                     remaining.add(iid_int)
                             except Exception:
                                 remaining.add(iid_int)
+                        # Remove only items tagged specifically for this HVAC (includes flow labels tagged with hvac:<name>)
+                        try:
+                            hv_tag = f'hvac:{name}'
+                            for tag_item in list(rc.canvas.find_withtag(hv_tag)):
+                                try:
+                                    rc.canvas.delete(tag_item)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         # update mapping ids to remaining ones
                         try:
                             existing_map['ids'] = remaining
