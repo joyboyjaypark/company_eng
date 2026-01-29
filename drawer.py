@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox, filedialog
 from math import sqrt, ceil
+import math
 import json
 import sys
 
@@ -4621,7 +4622,19 @@ class ResizableRectApp:
         if not rc:
             self.sizing_text.insert(tk.END, "오류: 활성 팔레트가 없습니다.\n")
             return
-        # reuse existing equal distribution if available: call palette helper
+
+        # Show AHU capacity dialog before performing equal distribution
+        try:
+            ok = self._show_ahu_capacity_dialog()
+        except Exception:
+            ok = False
+
+        if not ok:
+            # user cancelled or dialog failed
+            self.sizing_text.insert(tk.END, "균등 배분 취소됨.\n")
+            return
+
+        # reuse existing equal distribution: call palette helper
         try:
             rc.compute_and_apply_supply_flow()
             self.sizing_text.insert(tk.END, "균등 배분 수행 완료.\n")
@@ -6547,6 +6560,921 @@ class ResizableRectApp:
                 pass
         except Exception:
             pass
+
+    def _show_ahu_capacity_dialog(self):
+        """Modal dialog to input AHU capacity parameters used before equal distribution.
+
+        Fields:
+        - 전체현열량 (kcal/hr)
+        - 전체잠열량 (kcal/hr)
+        - 현열비 (sensible fraction) (자동계산, 기본 비활성)
+        - 실내온도 (℃)
+        - 실내상대습도 (%RH)
+        - 코일통과 후 지정상대습도 (%RH)
+
+        Behavior:
+        - If totals entered, 현열비 auto-calculated = sens/(sens+lat) and shown (disabled).
+        - User may check '현열비 수동입력' to enable manual editing of 현열비.
+          If manual 현열비 != 0, disable total sensible/latent inputs.
+        Returns True if user confirmed (OK), False if cancelled.
+        Stores values in self.ahu_capacity dict on OK.
+        """
+        try:
+            dlg = tk.Toplevel(self.root)
+            dlg.transient(self.root)
+            dlg.title('공조기 용량 입력')
+            dlg.grab_set()
+            # 외기조건 프레임박스 (최상단)
+            topframe = tk.LabelFrame(dlg, text='외기조건')
+            topframe.pack(fill=tk.X, padx=10, pady=(10,0))
+            # winter/summer outdoor inputs
+            win_db_var = tk.StringVar()
+            win_rh_var = tk.StringVar()
+            sum_db_var = tk.StringVar()
+            sum_rh_var = tk.StringVar()
+            # output vars for enthalpy (kcal/kg) and absolute humidity (g/kg)
+            win_h_var = tk.StringVar()
+            win_abs_var = tk.StringVar()
+            sum_h_var = tk.StringVar()
+            sum_abs_var = tk.StringVar()
+            tk.Label(topframe, text='겨울철 건구온도 (℃):').grid(row=0, column=0, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=win_db_var, width=10).grid(row=0, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='겨울철 상대습도 (%RH):').grid(row=0, column=2, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=win_rh_var, width=10).grid(row=0, column=3, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='엔탈피 (kcal/kg):').grid(row=0, column=4, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=win_h_var, width=12, state='readonly').grid(row=0, column=5, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='절대습도 (g/kg):').grid(row=0, column=6, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=win_abs_var, width=12, state='readonly').grid(row=0, column=7, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='여름철 건구온도 (℃):').grid(row=1, column=0, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=sum_db_var, width=10).grid(row=1, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='여름철 상대습도 (%RH):').grid(row=1, column=2, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=sum_rh_var, width=10).grid(row=1, column=3, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='엔탈피 (kcal/kg):').grid(row=1, column=4, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=sum_h_var, width=12, state='readonly').grid(row=1, column=5, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='절대습도 (g/kg):').grid(row=1, column=6, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=sum_abs_var, width=12, state='readonly').grid(row=1, column=7, sticky='w', padx=4, pady=2)
+            # layout
+            frm = tk.Frame(dlg)
+            frm.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+            def labeled_entry(parent, row, label_text, var, width=18):
+                tk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=4, pady=4)
+                ent = tk.Entry(parent, textvariable=var, width=width)
+                ent.grid(row=row, column=1, sticky='w', padx=4, pady=4)
+                return ent
+
+            # default sens/lat values set to 0 (kcal/hr)
+            total_sens_var = tk.StringVar(value='0')
+            total_lat_var = tk.StringVar(value='0')
+            sens_frac_var = tk.StringVar()
+            indoor_t_var = tk.StringVar(value='23.0')
+            indoor_rh_var = tk.StringVar(value='50')
+            coil_rh_var = tk.StringVar(value='95')
+            # LAT display variable
+            lat_var = tk.StringVar()
+            # Delta T display variable (indoor temp - LAT)
+            delta_var = tk.StringVar()
+            manual_frac_var = tk.IntVar(value=0)
+
+            ent_sens = labeled_entry(frm, 0, '전체현열량 (kcal/hr):', total_sens_var)
+            ent_lat = labeled_entry(frm, 1, '전체잠열량 (kcal/hr):', total_lat_var)
+            ent_frac = labeled_entry(frm, 2, '현열비 (0~1):', sens_frac_var)
+            # default: fraction entry disabled (auto-calculated)
+            try:
+                ent_frac.configure(state='disabled')
+            except Exception:
+                ent_frac.configure(state='readonly')
+
+            chk = tk.Checkbutton(frm, text='현열비 수동입력', variable=manual_frac_var)
+            chk.grid(row=2, column=2, sticky='w', padx=4)
+
+            ent_indoor_t = labeled_entry(frm, 3, '실내온도 (℃):', indoor_t_var)
+            ent_indoor_rh = labeled_entry(frm, 4, '실내상대습도 (%RH):', indoor_rh_var)
+            ent_coil_rh = labeled_entry(frm, 5, '코일통과 후 RH (%RH):', coil_rh_var)
+            # LAT display (read-only)
+            tk.Label(frm, text='LAT (℃):').grid(row=6, column=0, sticky='w', padx=4, pady=4)
+            ent_lat_display = tk.Entry(frm, textvariable=lat_var, width=18, state='readonly')
+            ent_lat_display.grid(row=6, column=1, sticky='w', padx=4, pady=4)
+            # Coil-exit enthalpy at LAT (read-only)
+            coil_ent_var = tk.StringVar()
+            tk.Label(frm, text='코일 통과 후 엔탈피 (kcal/kg):').grid(row=7, column=0, sticky='w', padx=4, pady=4)
+            ent_coil_ent = tk.Entry(frm, textvariable=coil_ent_var, width=18, state='readonly')
+            ent_coil_ent.grid(row=7, column=1, sticky='w', padx=4, pady=4)
+            # Delta T display (read-only)
+            tk.Label(frm, text='ΔT (℃):').grid(row=8, column=0, sticky='w', padx=4, pady=4)
+            ent_delta_display = tk.Entry(frm, textvariable=delta_var, width=18, state='readonly')
+            ent_delta_display.grid(row=8, column=1, sticky='w', padx=4, pady=4)
+            # AHU airflow display (read-only) computed from total sensible and delta T
+            flow_var = tk.StringVar()
+            tk.Label(frm, text='공조기 풍량 (m3/hr):').grid(row=9, column=0, sticky='w', padx=4, pady=4)
+            ent_flow_display = tk.Entry(frm, textvariable=flow_var, width=18, state='readonly')
+            ent_flow_display.grid(row=9, column=1, sticky='w', padx=4, pady=4)
+            # AHU-design delta (ΔT - 0.3) display and explanation
+            margin_flow_var = tk.StringVar()
+            # rename to 급기풍량 (supply flow)
+            tk.Label(frm, text='급기풍량 (m3/hr):').grid(row=12, column=0, sticky='w', padx=4, pady=4)
+            ent_margin_flow = tk.Entry(frm, textvariable=margin_flow_var, width=18, state='readonly')
+            ent_margin_flow.grid(row=12, column=1, sticky='w', padx=4, pady=4)
+            # Outdoor air input (accept number or percent)
+            outdoor_var = tk.StringVar()
+            tk.Label(frm, text='외기량 (m3/hr 또는 % 입력 가능):').grid(row=13, column=0, sticky='w', padx=4, pady=4)
+            ent_outdoor = tk.Entry(frm, textvariable=outdoor_var, width=18)
+            ent_outdoor.grid(row=13, column=1, sticky='w', padx=4, pady=4)
+            # Return air (회수풍량) display (read-only)
+            return_flow_var = tk.StringVar()
+            tk.Label(frm, text='회수풍량 (m3/hr):').grid(row=14, column=0, sticky='w', padx=4, pady=4)
+            ent_return_flow = tk.Entry(frm, textvariable=return_flow_var, width=18, state='readonly')
+            ent_return_flow.grid(row=14, column=1, sticky='w', padx=4, pady=4)
+            # Mixed temperature and enthalpy display
+            mix_temp_var = tk.StringVar()
+            mix_ent_var = tk.StringVar()
+            tk.Label(frm, text='혼합온도 (℃):').grid(row=15, column=0, sticky='w', padx=4, pady=4)
+            ent_mix_temp = tk.Entry(frm, textvariable=mix_temp_var, width=18, state='readonly')
+            ent_mix_temp.grid(row=15, column=1, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='혼합엔탈피 (kcal/kg):').grid(row=16, column=0, sticky='w', padx=4, pady=4)
+            ent_mix_ent = tk.Entry(frm, textvariable=mix_ent_var, width=18, state='readonly')
+            ent_mix_ent.grid(row=16, column=1, sticky='w', padx=4, pady=4)
+            # when focus leaves, if value contains % convert using margin_flow_var
+            def process_outdoor_focusout(event=None):
+                try:
+                    raw = (outdoor_var.get() or '').strip()
+                    if raw == '':
+                        return
+                    # percent input
+                    if '%' in raw:
+                        try:
+                            p = raw.replace('%', '').strip()
+                            p_num = to_float(p)
+                            if p_num is None:
+                                outdoor_var.set('')
+                                return
+                            p_frac = float(p_num) / 100.0
+                            base = to_float(margin_flow_var.get())
+                            if base is None:
+                                # can't compute without margin flow
+                                outdoor_var.set('')
+                                return
+                            val = float(base) * p_frac
+                            # ceil to nearest 100
+                            val_ceil = int(math.ceil(val / 100.0) * 100)
+                            outdoor_var.set(f"{val_ceil:,}")
+                            # update return air display
+                            try:
+                                update_return_air()
+                            except Exception:
+                                pass
+                        except Exception:
+                            outdoor_var.set('')
+                    else:
+                        # numeric input: format with commas, keep value as-is (no ceil)
+                        try:
+                            v = to_float(raw)
+                            if v is None:
+                                outdoor_var.set('')
+                                return
+                            vi = int(round(v))
+                            outdoor_var.set(f"{vi:,}")
+                            try:
+                                update_return_air()
+                            except Exception:
+                                pass
+                        except Exception:
+                            outdoor_var.set('')
+                except Exception:
+                    try:
+                        outdoor_var.set('')
+                    except Exception:
+                        pass
+
+            try:
+                ent_outdoor.bind('<FocusOut>', process_outdoor_focusout)
+                ent_outdoor.bind('<Return>', lambda e: process_outdoor_focusout())
+            except Exception:
+                pass
+
+            def update_return_air():
+                try:
+                    # parse supply (급기풍량) from margin_flow_var
+                    supply = to_float(margin_flow_var.get())
+                    if supply is None:
+                        return_flow_var.set('')
+                        return
+                    raw = (outdoor_var.get() or '').strip()
+                    if raw == '':
+                        return_flow_var.set('')
+                        return
+                    # if percent, compute outdoor from supply
+                    if '%' in raw:
+                        p = raw.replace('%', '').strip()
+                        pnum = to_float(p)
+                        if pnum is None:
+                            return_flow_var.set('')
+                            return
+                        outdoor_m3 = float(supply) * (float(pnum) / 100.0)
+                        outdoor_m3_ceil = int(math.ceil(outdoor_m3 / 100.0) * 100)
+                    else:
+                        v = to_float(raw.replace(',', ''))
+                        if v is None:
+                            return_flow_var.set('')
+                            return
+                        outdoor_m3_ceil = int(round(v))
+                    # compute return = supply - outdoor
+                    ret = float(supply) - float(outdoor_m3_ceil)
+                    if ret <= 0:
+                        # if non-positive, show 0
+                        return_flow_var.set('0')
+                    else:
+                        ret_ceil = int(math.ceil(ret / 100.0) * 100)
+                        return_flow_var.set(f"{ret_ceil:,}")
+                    # update mixed properties after return updated
+                    try:
+                        update_mixed_props()
+                    except Exception:
+                        pass
+                except Exception:
+                    try:
+                        return_flow_var.set('')
+                    except Exception:
+                        pass
+            # AHU-design delta (ΔT - 0.3) display and explanation
+            calc_delta_var = tk.StringVar()
+            tk.Label(frm, text='공조기 산정용 온도차 (℃):').grid(row=9, column=0, sticky='w', padx=4, pady=4)
+            ent_calc_delta = tk.Entry(frm, textvariable=calc_delta_var, width=18, state='readonly')
+            ent_calc_delta.grid(row=9, column=1, sticky='w', padx=4, pady=4)
+            # explanation: this value = ΔT - 0.3
+            expl = tk.Label(frm, text='(설명: 온도차에서 0.3을 뺀 값)')
+            expl.grid(row=10, column=0, columnspan=2, sticky='w', padx=4, pady=(0,6))
+
+            # bind key events to ensure recompute on typing (robust across platforms)
+            try:
+                ent_sens.bind('<KeyRelease>', lambda e: recompute_frac())
+                ent_lat.bind('<KeyRelease>', lambda e: recompute_frac())
+                ent_sens.bind('<FocusOut>', lambda e: format_total_with_commas(total_sens_var))
+                ent_lat.bind('<FocusOut>', lambda e: format_total_with_commas(total_lat_var))
+            except Exception:
+                pass
+            try:
+                ent_frac.bind('<KeyRelease>', lambda e: recompute_lat())
+            except Exception:
+                pass
+            try:
+                ent_indoor_t.bind('<KeyRelease>', lambda e: recompute_lat())
+                ent_indoor_rh.bind('<KeyRelease>', lambda e: recompute_lat())
+                ent_coil_rh.bind('<KeyRelease>', lambda e: recompute_lat())
+            except Exception:
+                pass
+
+            # helper parse (accept commas and NBSP)
+            def to_float(s):
+                try:
+                    if s is None:
+                        return None
+                    st = str(s).strip()
+                    st = st.replace(',', '').replace('\u00A0', '')
+                    if st == '':
+                        return None
+                    return float(st)
+                except Exception:
+                    return None
+
+            def format_total_with_commas(var):
+                try:
+                    v = to_float(var.get())
+                    if v is None:
+                        return
+                    vi = int(round(v))
+                    var.set(f"{vi:,}")
+                except Exception:
+                    pass
+
+            def recompute_frac(*a):
+                # if manual override is off, compute from totals
+                if manual_frac_var.get():
+                    return
+                s = to_float(total_sens_var.get())
+                l = to_float(total_lat_var.get())
+                if s is None or l is None:
+                    sens_frac_var.set('')
+                    return
+                denom = (s + l)
+                if denom == 0:
+                    sens_frac_var.set('')
+                    return
+                frac = s / denom
+                try:
+                    sens_frac_var.set(f"{frac:.3f}")
+                except Exception:
+                    sens_frac_var.set(str(frac))
+                # update LAT when fraction updated from totals
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            # helpers to compute enthalpy (kcal/kg) and absolute humidity (g/kg)
+            def enthalpy_kcal_per_kg(T_C, w):
+                # enthalpy_kJ_per_kg_dry returns kJ/kg; convert to kcal/kg (1 kJ = 0.239005736 kcal)
+                try:
+                    h_kj = enthalpy_kJ_per_kg_dry(T_C, w)
+                    return h_kj * 0.239005736
+                except Exception:
+                    return None
+
+            def abs_humidity_g_per_kg(T_C, RH_pct):
+                try:
+                    w = humidity_ratio(T_C, RH_pct / 100.0)
+                    if w is None:
+                        return None
+                    # w is kg water vapor per kg dry air -> multiply by 1000 g/kg
+                    return w * 1000.0
+                except Exception:
+                    return None
+
+            def recompute_outdoor_props(*a):
+                try:
+                    # winter
+                    try:
+                        t_w = to_float(win_db_var.get())
+                        rh_w = to_float(win_rh_var.get())
+                        if t_w is None or rh_w is None:
+                            win_h_var.set('')
+                            win_abs_var.set('')
+                        else:
+                            w_w = humidity_ratio(t_w, float(rh_w) / 100.0)
+                            h_w = enthalpy_kcal_per_kg(t_w, w_w) if w_w is not None else None
+                            if h_w is None:
+                                win_h_var.set('')
+                            else:
+                                # show with 2 decimal places
+                                win_h_var.set(f"{h_w:.2f}")
+                            if w_w is None:
+                                win_abs_var.set('')
+                            else:
+                                win_abs_var.set(f"{w_w*1000.0:.2f}")
+                    except Exception:
+                        win_h_var.set('')
+                        win_abs_var.set('')
+                    # summer
+                    try:
+                        t_s = to_float(sum_db_var.get())
+                        rh_s = to_float(sum_rh_var.get())
+                        if t_s is None or rh_s is None:
+                            sum_h_var.set('')
+                            sum_abs_var.set('')
+                        else:
+                            w_s = humidity_ratio(t_s, float(rh_s) / 100.0)
+                            h_s = enthalpy_kcal_per_kg(t_s, w_s) if w_s is not None else None
+                            if h_s is None:
+                                sum_h_var.set('')
+                            else:
+                                sum_h_var.set(f"{h_s:.2f}")
+                            if w_s is None:
+                                sum_abs_var.set('')
+                            else:
+                                sum_abs_var.set(f"{w_s*1000.0:.2f}")
+                    except Exception:
+                        sum_h_var.set('')
+                        sum_abs_var.set('')
+                except Exception:
+                    pass
+
+            # wire traces for outdoor condition inputs
+            try:
+                win_db_var.trace('w', lambda *a: recompute_outdoor_props())
+                win_rh_var.trace('w', lambda *a: recompute_outdoor_props())
+                sum_db_var.trace('w', lambda *a: recompute_outdoor_props())
+                sum_rh_var.trace('w', lambda *a: recompute_outdoor_props())
+            except Exception:
+                try:
+                    win_db_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                    win_rh_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                    sum_db_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                    sum_rh_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                except Exception:
+                    pass
+
+            def update_mixed_props():
+                try:
+                    # parse required values
+                    supply = to_float(margin_flow_var.get())
+                    # supply may be a formatted string like '1,200'
+                    if supply is None:
+                        supply = (stored_margin_flow if 'stored_margin_flow' in locals() else None)
+                    if supply is None or supply == 0:
+                        mix_temp_var.set('')
+                        mix_ent_var.set('')
+                        return
+                    # outdoor volume: if percent provided, compute from supply; else numeric
+                    outdoor_raw = (outdoor_var.get() or '').strip() if 'outdoor_var' in locals() else ''
+                    outdoor_m3 = None
+                    if outdoor_raw:
+                        if '%' in outdoor_raw:
+                            pnum = to_float(outdoor_raw.replace('%','').strip())
+                            if pnum is not None:
+                                outdoor_m3 = float(supply) * (float(pnum) / 100.0)
+                        else:
+                            outdoor_m3 = to_float(outdoor_raw.replace(',',''))
+                    # if outdoor_m3 not given, try stored outdoor
+                    if outdoor_m3 is None:
+                        outdoor_m3 = self.ahu_capacity.get('outdoor_m3_hr') if hasattr(self,'ahu_capacity') else None
+                    # return air numeric
+                    ret_raw = return_flow_var.get() if return_flow_var.get() else None
+                    return_m3 = None
+                    if ret_raw:
+                        return_m3 = to_float(str(ret_raw).replace(',',''))
+                    elif 'return_flow_var' in locals():
+                        return_m3 = None
+                    # if we still lack outdoor or return, attempt compute: return = supply - outdoor
+                    if outdoor_m3 is not None and (return_m3 is None):
+                        return_m3 = float(supply) - float(outdoor_m3)
+                    if outdoor_m3 is None or return_m3 is None:
+                        mix_temp_var.set('')
+                        mix_ent_var.set('')
+                        return
+                    # parse temps
+                    summer_db = to_float(sum_db_var.get())
+                    indoor_t = to_float(indoor_t_var.get())
+                    if summer_db is None or indoor_t is None:
+                        mix_temp_var.set('')
+                        mix_ent_var.set('')
+                        return
+                    # mixed temperature formula: (outdoor*summer_db + return*indoor_t) / supply
+                    try:
+                        mixed_T = (float(outdoor_m3) * float(summer_db) + float(return_m3) * float(indoor_t)) / float(supply)
+                        mix_temp_var.set(f"{mixed_T:.2f}")
+                    except Exception:
+                        mix_temp_var.set('')
+                    # mixed enthalpy: mass-weighted enthalpy per kg dry air (assume same basis)
+                    try:
+                        # compute outdoor enthalpy (use summer_db and outdoor RH input)
+                        out_rh = None
+                        if '%' in (sum_rh_var.get() or ''):
+                            out_rh = to_float(sum_rh_var.get().replace('%',''))
+                        else:
+                            out_rh = to_float(sum_rh_var.get())
+                        if out_rh is None:
+                            mix_ent_var.set('')
+                            return
+                        # compute outdoor w and h (kcal/kg)
+                        w_out = humidity_ratio(float(summer_db), float(out_rh)/100.0)
+                        h_out_kj = enthalpy_kJ_per_kg_dry(float(summer_db), w_out)
+                        h_out_kcal = h_out_kj * 0.2388458966 if h_out_kj is not None else None
+                        # compute return air enthalpy using indoor conditions
+                        w_ret = humidity_ratio(float(indoor_t_var.get()), float(indoor_rh_var.get())/100.0)
+                        h_ret_kj = enthalpy_kJ_per_kg_dry(float(indoor_t_var.get()), w_ret)
+                        h_ret_kcal = h_ret_kj * 0.2388458966 if h_ret_kj is not None else None
+                        if h_out_kcal is None or h_ret_kcal is None:
+                            mix_ent_var.set('')
+                            return
+                        # mass-weighted average enthalpy (assuming volumetric flows proportional to mass flows)
+                        mixed_h = (float(outdoor_m3) * float(h_out_kcal) + float(return_m3) * float(h_ret_kcal)) / float(supply)
+                        mix_ent_var.set(f"{mixed_h:.3f}")
+                    except Exception:
+                        mix_ent_var.set('')
+                except Exception:
+                    mix_temp_var.set('')
+                    mix_ent_var.set('')
+
+            def on_manual_toggle(*a):
+                manual = bool(manual_frac_var.get())
+                # enable or disable fraction entry
+                try:
+                    if manual:
+                        ent_frac.configure(state='normal')
+                    else:
+                        ent_frac.configure(state='disabled')
+                except Exception:
+                    try:
+                        if manual:
+                            ent_frac.configure(state='normal')
+                        else:
+                            ent_frac.configure(state='readonly')
+                    except Exception:
+                        pass
+                # if manual and fraction is non-zero, disable totals
+                f = to_float(sens_frac_var.get())
+                if manual and f is not None and abs(f) > 1e-9:
+                    try:
+                        ent_sens.configure(state='disabled')
+                        ent_lat.configure(state='disabled')
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        ent_sens.configure(state='normal')
+                        ent_lat.configure(state='normal')
+                    except Exception:
+                        pass
+                # if fraction changed manually, update LAT
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            def on_frac_change(*a):
+                if not manual_frac_var.get():
+                    return
+                f = to_float(sens_frac_var.get())
+                if f is not None and abs(f) > 1e-9:
+                    try:
+                        ent_sens.configure(state='disabled')
+                        ent_lat.configure(state='disabled')
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        ent_sens.configure(state='normal')
+                        ent_lat.configure(state='normal')
+                    except Exception:
+                        pass
+                # ensure LAT updates when fraction changes
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            # traces
+            try:
+                total_sens_var.trace('w', lambda *a: recompute_frac())
+                total_lat_var.trace('w', lambda *a: recompute_frac())
+                manual_frac_var.trace('w', lambda *a: on_manual_toggle())
+                sens_frac_var.trace('w', lambda *a: on_frac_change())
+                # also update LAT when temperature/RH fields change
+                try:
+                    indoor_t_var.trace('w', lambda *a: recompute_lat())
+                    indoor_rh_var.trace('w', lambda *a: recompute_lat())
+                    coil_rh_var.trace('w', lambda *a: recompute_lat())
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    total_sens_var.trace_add('write', lambda *a: recompute_frac())
+                    total_lat_var.trace_add('write', lambda *a: recompute_frac())
+                    manual_frac_var.trace_add('write', lambda *a: on_manual_toggle())
+                    sens_frac_var.trace_add('write', lambda *a: on_frac_change())
+                    # update LAT when temperature/RH/fraction change
+                    try:
+                        indoor_t_var.trace_add('write', lambda *a: recompute_lat())
+                        indoor_rh_var.trace_add('write', lambda *a: recompute_lat())
+                        coil_rh_var.trace_add('write', lambda *a: recompute_lat())
+                    except Exception:
+                        try:
+                            indoor_t_var.trace('w', lambda *a: recompute_lat())
+                            indoor_rh_var.trace('w', lambda *a: recompute_lat())
+                            coil_rh_var.trace('w', lambda *a: recompute_lat())
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # local psychrometric helpers and LAT solver
+            def p_ws_pa(T_C):
+                # Buck (1981) equation for saturation vapor pressure over water (hPa), then to Pa
+                # T_C expected in deg C
+                try:
+                    es_hpa = 6.1121 * math.exp((18.678 - T_C / 234.5) * (T_C / (257.14 + T_C)))
+                    return es_hpa * 100.0
+                except Exception:
+                    return 0.0
+
+            def humidity_ratio(T_C, RH_frac, p_pa=101325.0):
+                # epsilon: ratio of molecular weights (water/vapor)
+                eps = 0.621945
+                try:
+                    pv = RH_frac * p_ws_pa(T_C)
+                    if pv >= p_pa:
+                        return None
+                    return eps * pv / (p_pa - pv)
+                except Exception:
+                    return None
+
+            def enthalpy_kJ_per_kg_dry(T_C, w):
+                # Enthalpy using constant latent heat (A안): L = 2501.0 kJ/kg
+                cp_air = 1.005  # kJ/kg.K
+                cp_v = 1.86     # kJ/kg.K
+                L = 2501.0
+                return cp_air * T_C + w * (L + cp_v * T_C)
+
+            def compute_LAT_local(T1_C, RH1_pct, SHR, RH_target_pct, p_pa=101325.0, tol=1e-7):
+                # Use bisection on T2 with improved thermodynamics
+                try:
+                    T1 = float(T1_C)
+                    RHt = float(RH_target_pct) / 100.0
+                except Exception:
+                    return None
+                w1 = humidity_ratio(T1, float(RH1_pct) / 100.0, p_pa)
+                if w1 is None:
+                    return None
+                h1 = enthalpy_kJ_per_kg_dry(T1, w1)
+
+                cp_air = 1.005
+
+                def f(T2):
+                    pv2 = RHt * p_ws_pa(T2)
+                    if pv2 >= p_pa:
+                        return 1.0
+                    w2 = humidity_ratio(T2, RHt, p_pa)
+                    if w2 is None:
+                        return 1.0
+                    h2 = enthalpy_kJ_per_kg_dry(T2, w2)
+                    denom = (h1 - h2)
+                    if denom <= 1e-12:
+                        return 1.0
+                    SHR_calc = cp_air * (T1 - T2) / denom
+                    return SHR_calc - SHR
+
+                lo = -40.0
+                hi = T1 - 1e-9
+                try:
+                    f_lo = f(lo)
+                    f_hi = f(hi)
+                except Exception:
+                    return None
+                if f_lo * f_hi > 0:
+                    return None
+                for _ in range(300):
+                    mid = 0.5 * (lo + hi)
+                    f_mid = f(mid)
+                    if abs(f_mid) < tol:
+                        return mid
+                    if f_lo * f_mid <= 0:
+                        hi = mid
+                        f_hi = f_mid
+                    else:
+                        lo = mid
+                        f_lo = f_mid
+                return 0.5 * (lo + hi)
+
+            def recompute_lat(*a):
+                try:
+                    it = to_float(indoor_t_var.get())
+                    irh = to_float(indoor_rh_var.get())
+                    crh = to_float(coil_rh_var.get())
+                    f = to_float(sens_frac_var.get())
+                    if it is None or irh is None or crh is None or f is None:
+                        lat_var.set('')
+                        delta_var.set('')
+                        return
+                    lat = compute_LAT_local(it, irh, float(f), crh)
+                    if lat is None:
+                        lat_var.set('')
+                        delta_var.set('')
+                        return
+                    lat_var.set(f"{lat:.3f}")
+                    # compute coil-exit enthalpy at LAT using coil_rh_var
+                    try:
+                        crh_val = to_float(coil_rh_var.get())
+                        if crh_val is None:
+                            coil_ent_var.set('')
+                        else:
+                            w_coil = humidity_ratio(lat, float(crh_val) / 100.0)
+                            if w_coil is None:
+                                coil_ent_var.set('')
+                            else:
+                                h_coil_kcal = enthalpy_kcal_per_kg(lat, w_coil)
+                                if h_coil_kcal is None:
+                                    coil_ent_var.set('')
+                                else:
+                                    coil_ent_var.set(f"{h_coil_kcal:.3f}")
+                    except Exception:
+                        coil_ent_var.set('')
+                    # compute delta = indoor_temp - LAT
+                    try:
+                        if it is not None:
+                            delta = it - float(lat)
+                            # truncate from second decimal place (keep 1 decimal, no rounding)
+                            trunc = int(delta * 10) / 10.0
+                            delta_var.set(f"{trunc:.1f}")
+                        else:
+                            delta_var.set('')
+                    except Exception:
+                        delta_var.set('')
+                    # compute AHU-design delta = trunc - 0.3, show truncated to 1 decimal
+                    try:
+                        if delta_var.get() and delta_var.get() != '':
+                            try:
+                                dnum = float(delta_var.get())
+                                calc = dnum - 0.3
+                                calc_trunc = int(calc * 10) / 10.0
+                                calc_delta_var.set(f"{calc_trunc:.1f}")
+                            except Exception:
+                                calc_delta_var.set('')
+                        else:
+                            calc_delta_var.set('')
+                    except Exception:
+                        calc_delta_var.set('')
+                    # compute AHU airflow if possible: total_sensible / 1.2 / 0.24 / delta
+                    try:
+                        s_val = to_float(total_sens_var.get())
+                        if s_val is None or it is None or lat is None:
+                            flow_var.set('')
+                        else:
+                            # use the truncated delta (in deg C)
+                            if trunc == 0:
+                                flow_var.set('')
+                            else:
+                                q = float(s_val) / 1.2 / 0.24 / trunc
+                                # ceiling to nearest 100 (백의자리에서 올림)
+                                q_ceil100 = int(math.ceil(q / 100.0) * 100)
+                                flow_var.set(f"{q_ceil100:,}")
+                    except Exception:
+                        flow_var.set('')
+
+                    # compute margin-adjusted airflow using AHU-design delta (calc_delta_var)
+                    try:
+                        s_val = to_float(total_sens_var.get())
+                        if s_val is None or it is None or lat is None:
+                            margin_flow_var.set('')
+                        else:
+                            # use calc_delta_var (design delta) if available
+                            cd = to_float(calc_delta_var.get())
+                            if cd is None or cd == 0:
+                                margin_flow_var.set('')
+                            else:
+                                q_m = float(s_val) / 1.2 / 0.24 / float(cd)
+                                q_m_ceil100 = int(math.ceil(q_m / 100.0) * 100)
+                                margin_flow_var.set(f"{q_m_ceil100:,}")
+                    except Exception:
+                        margin_flow_var.set('')
+                    try:
+                        update_mixed_props()
+                    except Exception:
+                        pass
+                except Exception:
+                    lat_var.set('')
+                    delta_var.set('')
+
+            result = {'ok': False}
+
+            def on_ok():
+                # validate values
+                s = to_float(total_sens_var.get())
+                l = to_float(total_lat_var.get())
+                f = to_float(sens_frac_var.get())
+                it = to_float(indoor_t_var.get())
+                irh = to_float(indoor_rh_var.get())
+                crh = to_float(coil_rh_var.get())
+
+                # when manual fraction mode and fraction provided, totals may be disabled
+                if manual_frac_var.get():
+                    if f is None:
+                        messagebox.showerror('입력 오류', '현열비를 올바르게 입력하세요.')
+                        return
+                else:
+                    # require sensible and latent to be provided
+                    if s is None or l is None:
+                        messagebox.showerror('입력 오류', '전체현열량/전체잠열량을 올바르게 입력하세요.')
+                        return
+                    denom = s + l
+                    if denom == 0:
+                        messagebox.showerror('입력 오류', '전체현열량+전체잠열량의 합이 0입니다.')
+                        return
+                    # ensure fraction computed
+                    try:
+                        f = float(s) / float(denom)
+                    except Exception:
+                        f = None
+
+                # basic validation for temps/RH
+                if it is None or irh is None or crh is None:
+                    messagebox.showerror('입력 오류', '온도 및 상대습도 항목을 올바르게 입력하세요.')
+                    return
+
+                # store values
+                # compute LAT to store (if available)
+                try:
+                    lat_val = None
+                    fval = float(f) if f is not None else None
+                    if it is not None and irh is not None and crh is not None and fval is not None:
+                        lat_val = compute_LAT_local(it, irh, float(fval), crh)
+                except Exception:
+                    lat_val = None
+
+                # compute stored flow values using numeric parsed values
+                stored_flow = None
+                stored_margin_flow = None
+                try:
+                    s_num = to_float(total_sens_var.get())
+                    # prefer calc_delta_var for stored ahu_flow
+                    cd_num = to_float(calc_delta_var.get())
+                    dnum = to_float(delta_var.get())
+                    if s_num is not None and cd_num is not None and cd_num != 0:
+                        q_m = float(s_num) / 1.2 / 0.24 / float(cd_num)
+                        stored_margin_flow = int(math.ceil(q_m / 100.0) * 100)
+                    # legacy stored_flow based on truncated delta
+                    if s_num is not None and dnum is not None and dnum != 0:
+                        q = float(s_num) / 1.2 / 0.24 / float(dnum)
+                        stored_flow = int(math.ceil(q / 100.0) * 100)
+                except Exception:
+                    stored_flow = None
+                    stored_margin_flow = None
+
+                self.ahu_capacity = {
+                    'total_sensible_kcal_hr': s,
+                    'total_latent_kcal_hr': l,
+                    'sensible_fraction': f,
+                    'indoor_temp_c': it,
+                    'indoor_rh_pct': irh,
+                    'coil_exit_rh_pct': crh,
+                    'lat_c': lat_val,
+                    'delta_t_c': (dnum if 'dnum' in locals() else None),
+                    'design_delta_t_c': (cd_num if 'cd_num' in locals() else None),
+                    'ahu_flow_m3_hr': stored_margin_flow if stored_margin_flow is not None else stored_flow,
+                    'legacy_ahu_flow_m3_hr': stored_flow,
+                    'manual_frac': bool(manual_frac_var.get()),
+                    'outdoor_input_raw': (outdoor_var.get() if 'outdoor_var' in locals() else None),
+                    'outdoor_m3_hr': None
+                }
+                # store outdoor condition inputs (winter/summer)
+                try:
+                    self.ahu_capacity['outdoor_winter_db_c'] = to_float(win_db_var.get()) if 'win_db_var' in locals() else None
+                    self.ahu_capacity['outdoor_winter_rh_pct'] = to_float(win_rh_var.get()) if 'win_rh_var' in locals() else None
+                    self.ahu_capacity['outdoor_summer_db_c'] = to_float(sum_db_var.get()) if 'sum_db_var' in locals() else None
+                    self.ahu_capacity['outdoor_summer_rh_pct'] = to_float(sum_rh_var.get()) if 'sum_rh_var' in locals() else None
+                except Exception:
+                    # ignore storing outdoor conditions if any error
+                    pass
+                # compute stored outdoor value (numeric) if input present
+                try:
+                    if 'outdoor_var' in locals() and (outdoor_var.get() or '').strip() != '':
+                        raw = outdoor_var.get().strip()
+                        if '%' in raw:
+                            pnum = to_float(raw.replace('%', '').strip())
+                            base = (stored_margin_flow if stored_margin_flow is not None else stored_flow)
+                            if pnum is not None and base is not None:
+                                val = float(base) * (float(pnum) / 100.0)
+                                val_ceil = int(math.ceil(val / 100.0) * 100)
+                                self.ahu_capacity['outdoor_m3_hr'] = val_ceil
+                        else:
+                            vnum = to_float(raw)
+                            if vnum is not None:
+                                self.ahu_capacity['outdoor_m3_hr'] = int(round(vnum))
+                except Exception:
+                    self.ahu_capacity['outdoor_m3_hr'] = None
+                # compute stored return air = supply - outdoor
+                try:
+                    supply_num = None
+                    if 'margin_flow_var' in locals():
+                        supply_num = to_float(margin_flow_var.get())
+                    if supply_num is None:
+                        supply_num = (stored_margin_flow if stored_margin_flow is not None else stored_flow)
+                    out_num = self.ahu_capacity.get('outdoor_m3_hr')
+                    if supply_num is not None and out_num is not None:
+                        ret = float(supply_num) - float(out_num)
+                        if ret <= 0:
+                            self.ahu_capacity['return_air_m3_hr'] = 0
+                        else:
+                            self.ahu_capacity['return_air_m3_hr'] = int(math.ceil(ret / 100.0) * 100)
+                    else:
+                        self.ahu_capacity['return_air_m3_hr'] = None
+                except Exception:
+                    self.ahu_capacity['return_air_m3_hr'] = None
+                result['ok'] = True
+                try:
+                    dlg.grab_release()
+                except Exception:
+                    pass
+                dlg.destroy()
+
+            def on_cancel():
+                try:
+                    dlg.grab_release()
+                except Exception:
+                    pass
+                dlg.destroy()
+
+            btnf = tk.Frame(dlg)
+            btnf.pack(fill=tk.X, pady=(6,6))
+            okb = tk.Button(btnf, text='확인', command=on_ok)
+            okb.pack(side=tk.LEFT, padx=6)
+            cb = tk.Button(btnf, text='취소', command=on_cancel)
+            cb.pack(side=tk.RIGHT, padx=6)
+
+            # center dialog and wait
+            try:
+                dlg.update_idletasks()
+                w = dlg.winfo_width()
+                h = dlg.winfo_height()
+                x = (dlg.winfo_toplevel().winfo_screenwidth() - w) // 2
+                y = (dlg.winfo_toplevel().winfo_screenheight() - h) // 2
+                dlg.geometry(f'+{x}+{y}')
+            except Exception:
+                pass
+
+            # ensure LAT initialized before showing dialog
+            try:
+                recompute_frac()
+                recompute_lat()
+            except Exception:
+                pass
+            self.root.wait_window(dlg)
+            return bool(result.get('ok'))
+        except Exception as e:
+            try:
+                messagebox.showerror('오류', f'공조기 용량 입력창 생성 중 오류: {e}')
+            except Exception:
+                pass
+            return False
 
     def _refresh_diffuser_outlines(self, palette: 'Palette'):
         """Update outlines on the given palette: assigned -> red, otherwise clear unless selected (blue).
