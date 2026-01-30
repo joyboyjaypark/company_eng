@@ -157,24 +157,10 @@ class Palette:
         self.total_overlay_canvas = None
         self.total_overlay_rect_id = None
         self.use_total_overlay = False
-        self._force_visible_overlay = True
-        try:
-            self.enable_total_overlay(True)
-        except Exception:
-            pass
-
-        # Total-overlay Toplevel (used if user requests a system-level overlay)
-        self.total_overlay_toplevel = None
-        self.total_overlay_canvas = None
-        self.total_overlay_rect_id = None
-        self.use_total_overlay = False
-        # Force overlay visible for debugging (set True while we debug)
-        self._force_visible_overlay = True
-        # Auto-enable total overlay for immediate visual debugging of rubber-band
-        try:
-            self.enable_total_overlay(True)
-        except Exception:
-            pass
+        # Do NOT force a visible, topmost overlay by default —
+        # a topmost overlay can cover modal dialogs (hide buttons).
+        self._force_visible_overlay = False
+        # Do not auto-enable the total overlay; enable it explicitly when needed.
 
     def _to_overlay_coords(self, event):
         try:
@@ -209,7 +195,9 @@ class Palette:
             top = tk.Toplevel(root)
             top.overrideredirect(True)
             try:
-                top.wm_attributes("-topmost", True)
+                # Only make the overlay topmost when explicitly forcing visible
+                if getattr(self, '_force_visible_overlay', False):
+                    top.wm_attributes("-topmost", True)
             except Exception:
                 pass
             # Position and size to match the canvas on screen
@@ -2038,14 +2026,34 @@ class Palette:
         base_name = m.group(1).strip() if m else old
 
         # popup dialog with entry + combobox
-        dlg = tk.Toplevel(self.canvas.master)
-        dlg.transient(self.canvas.master)
-        dlg.title("공간편집")
-        # make popup wider so controls don't overlap
         try:
-            dlg.geometry("700x420")
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
         except Exception:
             pass
+        dlg = tk.Toplevel(self.canvas.master)
+        try:
+            dlg.lift()
+            try:
+                dlg.wm_attributes('-topmost', True)
+                dlg.after(60, lambda: dlg.wm_attributes('-topmost', False))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        dlg.transient(self.canvas.master)
+        dlg.title("공간편집")
+        # prefer letting the dialog size itself; enforce a reasonable minimum width/height
+        try:
+            dlg.minsize(700, 520)
+        except Exception:
+            try:
+                dlg.geometry("700x520")
+            except Exception:
+                pass
         # Reserve a right-side column for the CSV table so left-side controls keep their positions
         try:
             dlg.grid_columnconfigure(0, weight=0)
@@ -2908,10 +2916,13 @@ class Palette:
             except Exception:
                 csv_shown = None
 
-        ok_btn = tk.Button(dlg, text="확인", command=on_ok)
-        ok_btn.grid(row=6, column=0, padx=6, pady=8)
-        cancel_btn = tk.Button(dlg, text="취소", command=on_cancel)
-        cancel_btn.grid(row=6, column=1, padx=6, pady=8)
+        # 버튼 프레임을 하단에 고정 배치 (항상 보이도록)
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(side='bottom', fill='x', padx=6, pady=8)
+        ok_btn = tk.Button(btn_frame, text="확인", command=on_ok, width=10)
+        ok_btn.pack(side='left', padx=6)
+        cancel_btn = tk.Button(btn_frame, text="취소", command=on_cancel, width=10)
+        cancel_btn.pack(side='left', padx=6)
         name_entry.focus_set()
 
     def on_space_heat_norm_click(self, event):
@@ -6356,7 +6367,21 @@ class ResizableRectApp:
 
             # create popup window with Treeview
             try:
+                # ensure any transient overlay is removed so the dialog is visible
+                try:
+                    self._destroy_total_overlay()
+                except Exception:
+                    pass
                 win = tk.Toplevel(self.root)
+                try:
+                    win.lift()
+                    try:
+                        win.wm_attributes('-topmost', True)
+                        win.after(60, lambda: win.wm_attributes('-topmost', False))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
                 win.title('덕트 물량 상세')
                 win.geometry('800x400')
                 cols = ('HVAC', 'Line', 'Size', 'Length(m)', 'Area(m2)')
@@ -6580,7 +6605,21 @@ class ResizableRectApp:
         Stores values in self.ahu_capacity dict on OK.
         """
         try:
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
             dlg = tk.Toplevel(self.root)
+            try:
+                dlg.lift()
+                try:
+                    dlg.wm_attributes('-topmost', True)
+                    dlg.after(60, lambda: dlg.wm_attributes('-topmost', False))
+                except Exception:
+                    pass
+            except Exception:
+                pass
             dlg.transient(self.root)
             dlg.title('공조기계산')
             dlg.geometry('1400x800')  # 창 크기를 더 크게 설정
@@ -6621,10 +6660,15 @@ class ResizableRectApp:
             tk.Entry(topframe, textvariable=sum_h_var, width=12, state='readonly').grid(row=1, column=5, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='절대습도 (g/kg):').grid(row=1, column=6, sticky='w', padx=4, pady=2)
             tk.Entry(topframe, textvariable=sum_abs_var, width=12, state='readonly').grid(row=1, column=7, sticky='w', padx=4, pady=2)
+            
+            # 버튼 프레임을 먼저 하단에 고정 배치 (항상 보이도록)
+            btnf = tk.Frame(dlg)
+            btnf.pack(side='bottom', fill='x', padx=10, pady=8)
+            
             # layout
             # content frame holds the main form on the left and the chart area on the right
             content = tk.Frame(dlg)
-            # reduce bottom padding so the bottom button frame remains visible
+            # fill remaining space but leave room for bottom button frame
             content.pack(padx=10, pady=(10,0), fill=tk.BOTH, expand=True)
 
             frm = tk.Frame(content)
@@ -7812,9 +7856,9 @@ class ResizableRectApp:
                     plot_w = w - margin_l - margin_r
                     plot_h = h - margin_t - margin_b
                     
-                    # chart range: temp -10~40°C, abs humidity 0~25 g/kg
-                    xmin, xmax = -10.0, 40.0
-                    ymin, ymax = 0.0, 25.0
+                    # chart range: temp -15~40°C, abs humidity 0~50 g/kg
+                    xmin, xmax = -15.0, 40.0
+                    ymin, ymax = 0.0, 40.0
                     
                     def xpix(T):
                         return margin_l + (T - xmin) / (xmax - xmin) * plot_w
@@ -7825,14 +7869,14 @@ class ResizableRectApp:
                     cvs.create_text(w/2, 15, text='습공기 선도', font=('Arial', 11, 'bold'), fill='white')
                     
                     # grid: vertical temperature lines (every 5°C)
-                    for T in range(-10, 41, 5):
+                    for T in range(-15, 41, 5):
                         x = xpix(T)
                         cvs.create_line(x, margin_t, x, margin_t + plot_h, fill='#444444', width=1)
                         cvs.create_text(x, margin_t + plot_h + 10, text=str(T), fill='white', font=('Arial', 8))
                     cvs.create_text(margin_l + plot_w/2, h - 10, text='건구온도 (℃)', fill='white', font=('Arial', 9))
                     
                     # horizontal abs humidity lines (every 5 g/kg)
-                    for gpk in range(0, 26, 5):
+                    for gpk in range(0, 41, 5):
                         y = ypix(gpk)
                         cvs.create_line(margin_l, y, margin_l + plot_w, y, fill='#444444', width=1)
                         cvs.create_text(margin_l - 10, y, text=str(gpk), fill='white', font=('Arial', 8), anchor='e')
@@ -7879,7 +7923,7 @@ class ResizableRectApp:
                     for h_kj in range(10, 100, 10):
                         pts = []
                         # solve for points: given h_kj, find (T, w) pairs
-                        for T in range(-10, 41, 2):
+                        for T in range(-15, 41, 2):
                             try:
                                 # h_kj = 1.005*T + w*(2501 + 1.86*T)
                                 # solve for w: w = (h_kj - 1.005*T) / (2501 + 1.86*T)
@@ -7894,13 +7938,21 @@ class ResizableRectApp:
                             cvs.create_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], fill='#555555', width=1, dash=(2, 2))
                     
                     # plot calculated points
-                    def plot_point(T, gpk, label, color='red', size=5):
+                    def plot_point(T, gpk, label, color='red', size=5, rh=None):
                         try:
                             if T < xmin or T > xmax or gpk < ymin or gpk > ymax:
                                 return
                             x, y = xpix(T), ypix(gpk)
                             cvs.create_oval(x-size, y-size, x+size, y+size, fill=color, outline='white', width=1)
                             cvs.create_text(x+15, y-10, text=label, fill=color, font=('Arial', 8, 'bold'), anchor='w')
+                            # add temperature, RH, and absolute humidity info below the label
+                            info_lines = []
+                            info_lines.append(f'DB: {T:.1f}℃')
+                            if rh is not None:
+                                info_lines.append(f'RH: {rh:.0f}%')
+                            info_lines.append(f'AH: {gpk:.1f}g/kg')
+                            for i, line in enumerate(info_lines):
+                                cvs.create_text(x+15, y+2+i*10, text=line, fill=color, font=('Arial', 7), anchor='w')
                         except:
                             pass
                     
@@ -7908,8 +7960,9 @@ class ResizableRectApp:
                     try:
                         t_w = to_float(win_db_var.get())
                         w_w_g = to_float(win_abs_var.get())
+                        rh_w = to_float(win_rh_var.get())
                         if t_w is not None and w_w_g is not None:
-                            plot_point(float(t_w), float(w_w_g), '외기(동)', color='#00ccff')
+                            plot_point(float(t_w), float(w_w_g), '외기(동)', color='#00ccff', rh=rh_w)
                     except:
                         pass
                     
@@ -7917,17 +7970,248 @@ class ResizableRectApp:
                     try:
                         t_s = to_float(sum_db_var.get())
                         w_s_g = to_float(sum_abs_var.get())
+                        rh_s = to_float(sum_rh_var.get())
                         if t_s is not None and w_s_g is not None:
-                            plot_point(float(t_s), float(w_s_g), '외기(하)', color='#ff6600')
+                            plot_point(float(t_s), float(w_s_g), '외기(하)', color='#ff6600', rh=rh_s)
                     except:
+                        pass
+                    # draw line from summer outdoor to summer indoor and plot mixed point
+                    try:
+                        # retrieve summer indoor and outdoor values
+                        it = to_float(indoor_t_var.get())
+                        iw = to_float(indoor_abs_var.get())
+                        t_s = to_float(sum_db_var.get())
+                        w_s_g = to_float(sum_abs_var.get())
+                        if it is not None and iw is None:
+                            # compute iw from indoor RH if necessary
+                            irh = to_float(indoor_rh_var.get())
+                            if irh is not None:
+                                wtmp = humidity_ratio(float(it), float(irh) / 100.0)
+                                if wtmp is not None:
+                                    iw = wtmp * 1000.0
+                        if it is not None and iw is not None and t_s is not None and w_s_g is not None:
+                            # draw connecting line (summer outdoor -> summer indoor)
+                            try:
+                                x1, y1 = xpix(float(t_s)), ypix(float(w_s_g))
+                                x2, y2 = xpix(float(it)), ypix(float(iw))
+                                cvs.create_line(x1, y1, x2, y2, fill='#88ccff', width=2)
+                            except Exception:
+                                pass
+                            # compute and plot mixed point using same logic as update_mixed_props
+                            try:
+                                # parse supply/outdoor/return volumes
+                                supply = to_float(margin_flow_var.get())
+                                if supply is None:
+                                    supply = (stored_margin_flow if 'stored_margin_flow' in locals() else None)
+                                outdoor_raw = (outdoor_var.get() or '').strip()
+                                outdoor_m3 = None
+                                if outdoor_raw:
+                                    if '%' in outdoor_raw:
+                                        pnum = to_float(outdoor_raw.replace('%','').strip())
+                                        if pnum is not None and supply is not None:
+                                            outdoor_m3 = float(supply) * (float(pnum) / 100.0)
+                                    else:
+                                        outdoor_m3 = to_float(outdoor_raw.replace(',',''))
+                                if outdoor_m3 is None:
+                                    outdoor_m3 = self.ahu_capacity.get('outdoor_m3_hr') if hasattr(self,'ahu_capacity') else None
+                                return_m3 = None
+                                try:
+                                    ret_raw = return_flow_var.get() if return_flow_var.get() else None
+                                    if ret_raw:
+                                        return_m3 = to_float(str(ret_raw).replace(',',''))
+                                except Exception:
+                                    return_m3 = None
+                                if outdoor_m3 is not None and return_m3 is None and supply is not None:
+                                    return_m3 = float(supply) - float(outdoor_m3)
+                                if outdoor_m3 is not None and return_m3 is not None and supply is not None and supply != 0:
+                                    # compute outdoor and return absolute humidity in g/kg
+                                    try:
+                                        out_rh = to_float(sum_rh_var.get())
+                                        if out_rh is None:
+                                            out_rh = to_float(sum_rh_var.get().replace('%',''))
+                                    except Exception:
+                                        out_rh = None
+                                    w_out = humidity_ratio(float(t_s), float(out_rh)/100.0) if out_rh is not None else None
+                                    w_ret = humidity_ratio(float(indoor_t_var.get()), float(indoor_rh_var.get())/100.0) if (indoor_t_var.get() and indoor_rh_var.get()) else None
+                                    if w_out is not None and w_ret is not None:
+                                        # convert to g/kg
+                                        w_out_g = w_out * 1000.0
+                                        w_ret_g = w_ret * 1000.0
+                                        mixed_w_g = (float(outdoor_m3) * float(w_out_g) + float(return_m3) * float(w_ret_g)) / float(supply)
+                                        mixed_T = (float(outdoor_m3) * float(t_s) + float(return_m3) * float(it)) / float(supply)
+                                        # compute RH at mixed point
+                                        mixed_rh = None
+                                        try:
+                                            w_kg = mixed_w_g / 1000.0
+                                            w_sat = humidity_ratio(mixed_T, 1.0)
+                                            if w_sat is not None and w_sat > 0:
+                                                mixed_rh = (w_kg / w_sat) * 100.0
+                                        except Exception:
+                                            pass
+                                        # plot mixed point
+                                        try:
+                                            plot_point(float(mixed_T), float(mixed_w_g), '혼합', color='#ffff88', size=4, rh=mixed_rh)
+                                            x_m = xpix(float(mixed_T))
+                                            y_m = ypix(float(mixed_w_g))
+                                        except Exception:
+                                            pass
+                                        # Draw horizontal line from mixed point to coil-exit RH curve (coil_rh_var),
+                                        # then follow that RH curve to the LAT temperature point. Use sky-blue color.
+                                        try:
+                                            crh_val = to_float(coil_rh_var.get())
+                                            lat_t = to_float(lat_var.get())
+                                            if crh_val is not None and x_m is not None and y_m is not None:
+                                                # find T on the coil-RH curve where absolute humidity ~= mixed_w_g
+                                                best_T = None
+                                                best_diff = None
+                                                step_search = 0.2
+                                                T = xmin
+                                                while T <= xmax:
+                                                    try:
+                                                        w_rh = humidity_ratio(T, float(crh_val) / 100.0)
+                                                        if w_rh is not None:
+                                                            w_rh_g = w_rh * 1000.0
+                                                            diff = abs(w_rh_g - float(mixed_w_g))
+                                                            if best_diff is None or diff < best_diff:
+                                                                best_diff = diff
+                                                                best_T = T
+                                                    except Exception:
+                                                        pass
+                                                    T += step_search
+                                                if best_T is not None:
+                                                    x_int = xpix(best_T)
+                                                    # horizontal line to RH curve intersection
+                                                    try:
+                                                        cvs.create_line(x_m, y_m, x_int, y_m, fill='#87CEEB', width=2)
+                                                    except Exception:
+                                                        pass
+                                                    # follow RH curve from intersection to LAT temperature (if LAT available)
+                                                    try:
+                                                        # build RH points for coil_rh from best_T towards lat_t
+                                                        pts_rh = []
+                                                        if lat_t is None:
+                                                            # if LAT unknown, just draw a short segment along RH curve (to the right)
+                                                            Tstart = best_T
+                                                            Tend = min(xmax, best_T + 5.0)
+                                                        else:
+                                                            Tstart = best_T
+                                                            Tend = float(lat_t)
+                                                        # choose direction and step
+                                                        if Tend >= Tstart:
+                                                            T = Tstart
+                                                            step_dir = abs(step_search)
+                                                            cond = lambda a, b: a <= b + 1e-9
+                                                        else:
+                                                            T = Tstart
+                                                            step_dir = -abs(step_search)
+                                                            cond = lambda a, b: a >= b - 1e-9
+                                                        # sample points along RH curve
+                                                        while cond(T, Tend):
+                                                            try:
+                                                                w_rh = humidity_ratio(T, float(crh_val) / 100.0)
+                                                                if w_rh is not None:
+                                                                    w_rh_g = w_rh * 1000.0
+                                                                    if w_rh_g >= ymin and w_rh_g <= ymax:
+                                                                        pts_rh.append((xpix(T), ypix(w_rh_g)))
+                                                            except Exception:
+                                                                pass
+                                                            T += step_dir
+                                                        # if LAT provided, ensure the LAT point on RH curve included (compute exact w at LAT)
+                                                        if lat_t is not None:
+                                                            try:
+                                                                w_at_lat = humidity_ratio(float(lat_t), float(crh_val) / 100.0)
+                                                                if w_at_lat is not None:
+                                                                    w_at_lat_g = w_at_lat * 1000.0
+                                                                    pts_rh.append((xpix(float(lat_t)), ypix(w_at_lat_g)))
+                                                            except Exception:
+                                                                pass
+                                                        # draw the RH-curve-following line
+                                                        if len(pts_rh) >= 2:
+                                                            for ii in range(len(pts_rh)-1):
+                                                                try:
+                                                                    cvs.create_line(pts_rh[ii][0], pts_rh[ii][1], pts_rh[ii+1][0], pts_rh[ii+1][1], fill='#87CEEB', width=2)
+                                                                except Exception:
+                                                                    pass
+                                                    except Exception:
+                                                        pass
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                    except Exception:
                         pass
                     
                     # indoor (summer)
                     try:
                         it = to_float(indoor_t_var.get())
+                        irh = to_float(indoor_rh_var.get())
                         iw = to_float(indoor_abs_var.get())
+                        # compute iw from RH if missing
+                        try:
+                            if (iw is None) and (it is not None) and (irh is not None):
+                                w = humidity_ratio(float(it), float(irh) / 100.0)
+                                if w is not None:
+                                    iw = w * 1000.0
+                        except Exception:
+                            pass
+
                         if it is not None and iw is not None:
-                            plot_point(float(it), float(iw), '실내(하)', color='#00ff00')
+                            plot_point(float(it), float(iw), '실내(하)', color='#00ff00', rh=irh)
+                            # Draw SHF (현열비) line at the summer indoor point if sens_frac available
+                            try:
+                                f = to_float(sens_frac_var.get())
+                                if f is None:
+                                    # try to compute from totals if available
+                                    try:
+                                        s_num = to_float(total_sens_var.get())
+                                        l_num = to_float(total_lat_var.get())
+                                        if s_num is not None and l_num is not None and (s_num + l_num) != 0:
+                                            f = float(s_num) / float(s_num + l_num)
+                                    except Exception:
+                                        f = None
+                                if f is not None:
+                                    try:
+                                        ff = float(f)
+                                    except Exception:
+                                        ff = None
+                                    # Build SHF line starting at summer indoor point (it, iw)
+                                    step = 0.5
+                                    pts_left = []
+                                    try:
+                                        # extend to the left (decreasing temperature) from indoor temperature until saturation reached
+                                        Tcur = float(it) - step
+                                        Tmin = float(xmin)
+                                        while Tcur >= Tmin:
+                                            w_line = float(iw)
+                                            if ff is not None and ff > 0 and ff < 1:
+                                                cp = 1.005
+                                                L = 2501.0
+                                                slope = 1000.0 * cp * (1.0 - ff) / (ff * L)
+                                                w_line = float(iw) + slope * (Tcur - float(it))
+                                            try:
+                                                w_sat = humidity_ratio(Tcur, 1.0)
+                                                w_sat_g = None if w_sat is None else (w_sat * 1000.0)
+                                            except Exception:
+                                                w_sat_g = None
+                                            # include point only if below or equal to saturation and within y range
+                                            if w_sat_g is not None and w_line <= w_sat_g and w_line >= ymin and w_line <= ymax:
+                                                pts_left.append((xpix(Tcur), ypix(w_line)))
+                                                Tcur -= step
+                                            else:
+                                                break
+                                    except Exception:
+                                        pts_left = []
+                                    # build sequence from indoor point to leftmost point
+                                    pts_combined = [(xpix(float(it)), ypix(float(iw)))] + pts_left
+                                    # draw if at least two distinct points exist
+                                    if len(pts_combined) >= 2:
+                                        for ii in range(len(pts_combined) - 1):
+                                            try:
+                                                cvs.create_line(pts_combined[ii][0], pts_combined[ii][1], pts_combined[ii+1][0], pts_combined[ii+1][1], fill='#88ff88', width=2, dash=(4,2))
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
                     except:
                         pass
                     
@@ -7935,8 +8219,9 @@ class ResizableRectApp:
                     try:
                         iwt = to_float(indoor_w_t_var.get())
                         iww = to_float(indoor_w_abs_var.get())
+                        iwrh = to_float(indoor_w_rh_var.get())
                         if iwt is not None and iww is not None:
-                            plot_point(float(iwt), float(iww), '실내(동)', color='#ffff00')
+                            plot_point(float(iwt), float(iww), '실내(동)', color='#ffff00', rh=iwrh)
                     except:
                         pass
                     
@@ -7947,8 +8232,61 @@ class ResizableRectApp:
                         if lat is not None and crh is not None:
                             w_coil = humidity_ratio(lat, float(crh) / 100.0)
                             if w_coil is not None:
-                                plot_point(float(lat), w_coil * 1000.0, 'LAT', color='#ff00ff')
+                                plot_point(float(lat), w_coil * 1000.0, 'LAT', color='#ff00ff', rh=crh)
                     except:
+                        pass
+                    
+                    # LAT(동) point and lines
+                    try:
+                        # compute LAT(동) temperature: indoor_winter_temp + (indoor_heat_load / 1.2 / 0.24 / supply_flow)
+                        iwt = to_float(indoor_w_t_var.get())
+                        heat_load = to_float(indoor_heat_load_var.get())
+                        supply = to_float(margin_flow_var.get())
+                        if supply is None:
+                            supply = to_float(flow_var.get())
+                        winter_out_abs = to_float(win_abs_var.get())
+                        winter_out_temp = to_float(win_db_var.get())
+                        
+                        if iwt is not None and heat_load is not None and supply is not None and supply != 0 and winter_out_abs is not None and winter_out_temp is not None:
+                            # LAT(동) temperature
+                            lat_winter_temp = float(iwt) + (float(heat_load) / 1.2 / 0.24 / float(supply))
+                            # LAT(동) absolute humidity = winter outdoor absolute humidity
+                            lat_winter_abs = float(winter_out_abs)
+                            # compute RH at LAT(동) point
+                            lat_winter_rh = None
+                            try:
+                                w_kg = lat_winter_abs / 1000.0
+                                w_sat = humidity_ratio(lat_winter_temp, 1.0)
+                                if w_sat is not None and w_sat > 0:
+                                    lat_winter_rh = (w_kg / w_sat) * 100.0
+                            except Exception:
+                                pass
+                            
+                            # plot LAT(동) point
+                            plot_point(lat_winter_temp, lat_winter_abs, 'LAT(동)', color='#ff0000', rh=lat_winter_rh)
+                            
+                            # draw red line from winter outdoor to LAT(동) (horizontal line)
+                            try:
+                                x1 = xpix(float(winter_out_temp))
+                                y1 = ypix(float(winter_out_abs))
+                                x2 = xpix(lat_winter_temp)
+                                y2 = ypix(lat_winter_abs)
+                                cvs.create_line(x1, y1, x2, y2, fill='#ff0000', width=2)
+                            except Exception:
+                                pass
+                            
+                            # draw red line from LAT(동) to indoor(winter)
+                            try:
+                                iww = to_float(indoor_w_abs_var.get())
+                                if iww is not None:
+                                    x3 = xpix(lat_winter_temp)
+                                    y3 = ypix(lat_winter_abs)
+                                    x4 = xpix(float(iwt))
+                                    y4 = ypix(float(iww))
+                                    cvs.create_line(x3, y3, x4, y4, fill='#ff0000', width=2)
+                            except Exception:
+                                pass
+                    except Exception:
                         pass
                 except Exception:
                     pass
@@ -8196,17 +8534,15 @@ class ResizableRectApp:
                     pass
                 dlg.destroy()
 
-            btnf = tk.Frame(dlg)
-            # pack at bottom to ensure buttons remain visible when content expands
-            btnf.pack(side='bottom', fill=tk.X, pady=(6,6))
+            # 버튼은 이미 위에서 btnf 프레임으로 생성되어 pack됨
             try:
                 dlg.lift()
             except Exception:
                 pass
-            okb = tk.Button(btnf, text='확인', command=on_ok)
+            okb = tk.Button(btnf, text='확인', command=on_ok, width=10)
             okb.pack(side=tk.LEFT, padx=6)
-            cb = tk.Button(btnf, text='취소', command=on_cancel)
-            cb.pack(side=tk.RIGHT, padx=6)
+            cb = tk.Button(btnf, text='취소', command=on_cancel, width=10)
+            cb.pack(side=tk.LEFT, padx=6)
 
             # center dialog and wait
             try:
@@ -9364,7 +9700,24 @@ class ResizableRectApp:
         except Exception:
             pass
         
+        try:
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
+        except Exception:
+            pass
         win = tk.Toplevel(self.root)
+        try:
+            win.lift()
+            try:
+                win.wm_attributes('-topmost', True)
+                win.after(60, lambda: win.wm_attributes('-topmost', False))
+            except Exception:
+                pass
+        except Exception:
+            pass
         win.title(f"CSV 미리보기 - {os.path.basename(file_path)} ({used_enc})")
         win.geometry("800x400")
 
@@ -9674,7 +10027,21 @@ class ResizableRectApp:
 
         # --- Show preview window with multiple tabs (like Excel sheets): pivot + per-room tabs ---
         try:
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
             pv = tk.Toplevel(self.root)
+            try:
+                pv.lift()
+                try:
+                    pv.wm_attributes('-topmost', True)
+                    pv.after(60, lambda: pv.wm_attributes('-topmost', False))
+                except Exception:
+                    pass
+            except Exception:
+                pass
             pv.title("장비일람표 미리보기")
             pv.geometry("1000x520")
 
