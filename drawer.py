@@ -6582,40 +6582,58 @@ class ResizableRectApp:
         try:
             dlg = tk.Toplevel(self.root)
             dlg.transient(self.root)
-            dlg.title('공조기 용량 입력')
+            dlg.title('공조기계산')
+            dlg.geometry('1400x800')  # 창 크기를 더 크게 설정
             dlg.grab_set()
             # 외기조건 프레임박스 (최상단)
             topframe = tk.LabelFrame(dlg, text='외기조건')
             topframe.pack(fill=tk.X, padx=10, pady=(10,0))
-            # winter/summer outdoor inputs
-            win_db_var = tk.StringVar()
-            win_rh_var = tk.StringVar()
-            sum_db_var = tk.StringVar()
-            sum_rh_var = tk.StringVar()
+            # winter/summer outdoor inputs with defaults
+            win_db_var = tk.StringVar(value='-12')
+            win_rh_var = tk.StringVar(value='90')
+            sum_db_var = tk.StringVar(value='32')
+            sum_rh_var = tk.StringVar(value='60')
+            # touched flags: if defaults present, mark touched so values compute on open
+            win_touched = bool(str(win_db_var.get()).strip() or str(win_rh_var.get()).strip())
+            sum_touched = bool(str(sum_db_var.get()).strip() or str(sum_rh_var.get()).strip())
             # output vars for enthalpy (kcal/kg) and absolute humidity (g/kg)
             win_h_var = tk.StringVar()
             win_abs_var = tk.StringVar()
             sum_h_var = tk.StringVar()
             sum_abs_var = tk.StringVar()
             tk.Label(topframe, text='겨울철 건구온도 (℃):').grid(row=0, column=0, sticky='w', padx=4, pady=2)
-            tk.Entry(topframe, textvariable=win_db_var, width=10).grid(row=0, column=1, sticky='w', padx=4, pady=2)
+            win_db_entry = tk.Entry(topframe, textvariable=win_db_var, width=10)
+            win_db_entry.grid(row=0, column=1, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='겨울철 상대습도 (%RH):').grid(row=0, column=2, sticky='w', padx=4, pady=2)
-            tk.Entry(topframe, textvariable=win_rh_var, width=10).grid(row=0, column=3, sticky='w', padx=4, pady=2)
+            win_rh_entry = tk.Entry(topframe, textvariable=win_rh_var, width=10)
+            win_rh_entry.grid(row=0, column=3, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='엔탈피 (kcal/kg):').grid(row=0, column=4, sticky='w', padx=4, pady=2)
             tk.Entry(topframe, textvariable=win_h_var, width=12, state='readonly').grid(row=0, column=5, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='절대습도 (g/kg):').grid(row=0, column=6, sticky='w', padx=4, pady=2)
             tk.Entry(topframe, textvariable=win_abs_var, width=12, state='readonly').grid(row=0, column=7, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='여름철 건구온도 (℃):').grid(row=1, column=0, sticky='w', padx=4, pady=2)
-            tk.Entry(topframe, textvariable=sum_db_var, width=10).grid(row=1, column=1, sticky='w', padx=4, pady=2)
+            sum_db_entry = tk.Entry(topframe, textvariable=sum_db_var, width=10)
+            sum_db_entry.grid(row=1, column=1, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='여름철 상대습도 (%RH):').grid(row=1, column=2, sticky='w', padx=4, pady=2)
-            tk.Entry(topframe, textvariable=sum_rh_var, width=10).grid(row=1, column=3, sticky='w', padx=4, pady=2)
+            sum_rh_entry = tk.Entry(topframe, textvariable=sum_rh_var, width=10)
+            sum_rh_entry.grid(row=1, column=3, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='엔탈피 (kcal/kg):').grid(row=1, column=4, sticky='w', padx=4, pady=2)
             tk.Entry(topframe, textvariable=sum_h_var, width=12, state='readonly').grid(row=1, column=5, sticky='w', padx=4, pady=2)
             tk.Label(topframe, text='절대습도 (g/kg):').grid(row=1, column=6, sticky='w', padx=4, pady=2)
             tk.Entry(topframe, textvariable=sum_abs_var, width=12, state='readonly').grid(row=1, column=7, sticky='w', padx=4, pady=2)
             # layout
-            frm = tk.Frame(dlg)
-            frm.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+            # content frame holds the main form on the left and the chart area on the right
+            content = tk.Frame(dlg)
+            # reduce bottom padding so the bottom button frame remains visible
+            content.pack(padx=10, pady=(10,0), fill=tk.BOTH, expand=True)
+
+            frm = tk.Frame(content)
+            frm.pack(side='left', fill=tk.BOTH, expand=False)
+
+            # chart container on the right (initially empty - will draw a psychrometric chart)
+            chart_frame = tk.Frame(content, width=700, height=650)
+            chart_frame.pack_propagate(False)
+            chart_frame.pack(side='right', padx=(10,0), fill='both', expand=True)
 
             def labeled_entry(parent, row, label_text, var, width=18):
                 tk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=4, pady=4)
@@ -6623,12 +6641,15 @@ class ResizableRectApp:
                 ent.grid(row=row, column=1, sticky='w', padx=4, pady=4)
                 return ent
 
-            # default sens/lat values set to 0 (kcal/hr)
-            total_sens_var = tk.StringVar(value='0')
-            total_lat_var = tk.StringVar(value='0')
+            # default sens/lat values
+            total_sens_var = tk.StringVar(value='120,000')
+            total_lat_var = tk.StringVar(value='12,000')
             sens_frac_var = tk.StringVar()
             indoor_t_var = tk.StringVar(value='23.0')
             indoor_rh_var = tk.StringVar(value='50')
+            # 동절기(겨울) 입력값 — 초기값은 하절기와 동일
+            indoor_w_t_var = tk.StringVar(value=indoor_t_var.get())
+            indoor_w_rh_var = tk.StringVar(value=indoor_rh_var.get())
             coil_rh_var = tk.StringVar(value='95')
             # LAT display variable
             lat_var = tk.StringVar()
@@ -6645,55 +6666,289 @@ class ResizableRectApp:
             except Exception:
                 ent_frac.configure(state='readonly')
 
-            chk = tk.Checkbutton(frm, text='현열비 수동입력', variable=manual_frac_var)
-            chk.grid(row=2, column=2, sticky='w', padx=4)
+            chk = tk.Checkbutton(frm, text='수동입력', variable=manual_frac_var)
+            # Do not change grid positions of the label and entry for 현열비.
+            # Instead place the checkbox visually between them after layout using absolute placement.
+            def place_manual_chk():
+                try:
+                    # find the label and entry widgets placed by labeled_entry at row=2
+                    lbls = frm.grid_slaves(row=2, column=0)
+                    ents = frm.grid_slaves(row=2, column=1)
+                    if not lbls or not ents:
+                        # try again shortly if geometry not ready
+                        frm.after(50, place_manual_chk)
+                        return
+                    lbl = lbls[0]
+                    ent_widget = ents[0]
+                    # compute x as right edge of label + small gap
+                    x = lbl.winfo_x() + lbl.winfo_width() + 6
+                    # align vertically with the entry widget
+                    y = ent_widget.winfo_y()
+                    chk.place(x=x, y=y)
+                except Exception:
+                    try:
+                        frm.after(50, place_manual_chk)
+                    except Exception:
+                        pass
 
-            ent_indoor_t = labeled_entry(frm, 3, '실내온도 (℃):', indoor_t_var)
-            ent_indoor_rh = labeled_entry(frm, 4, '실내상대습도 (%RH):', indoor_rh_var)
-            ent_coil_rh = labeled_entry(frm, 5, '코일통과 후 RH (%RH):', coil_rh_var)
+            # schedule placement after geometry is calculated
+            frm.after(50, place_manual_chk)
+
+            # 실내난방부하 (kcal/hr) - insert after 현열비 and before 실내온도
+            indoor_heat_load_var = tk.StringVar(value='50000')
+            ent_indoor_heat = labeled_entry(frm, 3, '실내난방부하 (kcal/hr):', indoor_heat_load_var)
+            # live-format for indoor heat load
+            def live_format_heat(event=None):
+                try:
+                    s = indoor_heat_load_var.get()
+                    if not s:
+                        return
+                    st = str(s).replace(',', '').replace('\u00A0', '').strip()
+                    if st == '':
+                        return
+                    v = float(st)
+                    indoor_heat_load_var.set(f"{int(round(v)):,.0f}")
+                except Exception:
+                    return
+
+            ent_indoor_heat.bind('<KeyRelease>', live_format_heat)
+
+            # create an Indoor Conditions frame right above the main form
+            # 체크된 상태가 기본 (동절기조건 동일)
+            indoor_same_winter_var = tk.IntVar(value=1)
+            indoor_frame = tk.LabelFrame(dlg, text='실내조건')
+            # entries inside indoor_frame
+            tk.Label(indoor_frame, text='(하절기)건구온도 (℃):').grid(row=0, column=0, sticky='w', padx=4, pady=2)
+            ent_indoor_t_entry = tk.Entry(indoor_frame, textvariable=indoor_t_var, width=10)
+            ent_indoor_t_entry.grid(row=0, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(indoor_frame, text='(하절기)상대습도 (%RH):').grid(row=0, column=2, sticky='w', padx=4, pady=2)
+            ent_indoor_rh_entry = tk.Entry(indoor_frame, textvariable=indoor_rh_var, width=10)
+            ent_indoor_rh_entry.grid(row=0, column=3, sticky='w', padx=4, pady=2)
+            # absolute humidity next to RH (read-only, g/kg)
+            indoor_abs_var = tk.StringVar()
+            tk.Label(indoor_frame, text='(하절기)절대습도 (g/kg):').grid(row=0, column=4, sticky='w', padx=4, pady=2)
+            ent_indoor_abs = tk.Entry(indoor_frame, textvariable=indoor_abs_var, width=10, state='readonly')
+            ent_indoor_abs.grid(row=0, column=5, sticky='w', padx=4, pady=2)
+            # checkbox placed to the far right
+            try:
+                chk_same = tk.Checkbutton(indoor_frame, variable=indoor_same_winter_var, text='동절기 조건 동일')
+                chk_same.grid(row=0, column=6, sticky='w', padx=4, pady=2)
+            except Exception:
+                pass
+
+            # 동절기 입력창 (초기값은 하절기 값과 동일)
+            tk.Label(indoor_frame, text='(동절기)건구온도 (℃):').grid(row=1, column=0, sticky='w', padx=4, pady=2)
+            ent_indoor_w_t_entry = tk.Entry(indoor_frame, textvariable=indoor_w_t_var, width=10)
+            ent_indoor_w_t_entry.grid(row=1, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(indoor_frame, text='(동절기)상대습도 (%RH):').grid(row=1, column=2, sticky='w', padx=4, pady=2)
+            ent_indoor_w_rh_entry = tk.Entry(indoor_frame, textvariable=indoor_w_rh_var, width=10)
+            ent_indoor_w_rh_entry.grid(row=1, column=3, sticky='w', padx=4, pady=2)
+            # absolute humidity for winter
+            indoor_w_abs_var = tk.StringVar()
+            tk.Label(indoor_frame, text='(동절기)절대습도 (g/kg):').grid(row=1, column=4, sticky='w', padx=4, pady=2)
+            ent_indoor_w_abs = tk.Entry(indoor_frame, textvariable=indoor_w_abs_var, width=10, state='readonly')
+            ent_indoor_w_abs.grid(row=1, column=5, sticky='w', padx=4, pady=2)
+
+            # handlers: toggle enable/disable and sync values from 하절기 -> 동절기 when checked
+            def on_same_toggle(*_a):
+                same = bool(indoor_same_winter_var.get())
+                st = 'disabled' if same else 'normal'
+                try:
+                    ent_indoor_w_t_entry.configure(state=st)
+                    ent_indoor_w_rh_entry.configure(state=st)
+                except Exception:
+                    pass
+                if same:
+                    # copy current 하절기 values into 동절기
+                    indoor_w_t_var.set(indoor_t_var.get())
+                    indoor_w_rh_var.set(indoor_rh_var.get())
+                # when toggling, update mixed/coil calculations to reflect new state
+                try:
+                    update_mixed_props()
+                except Exception:
+                    try:
+                        recompute_lat()
+                    except Exception:
+                        pass
+
+            def sync_summer_to_winter(*_a):
+                if indoor_same_winter_var.get():
+                    indoor_w_t_var.set(indoor_t_var.get())
+                    indoor_w_rh_var.set(indoor_rh_var.get())
+
+            # attach traces
+            try:
+                indoor_same_winter_var.trace('w', lambda *a: on_same_toggle())
+                indoor_t_var.trace('w', lambda *a: sync_summer_to_winter())
+                indoor_rh_var.trace('w', lambda *a: sync_summer_to_winter())
+                # update absolute humidity displays when indoor temp or RH change
+                def update_indoor_abs(*_a):
+                    try:
+                        t = to_float(indoor_t_var.get())
+                        rh = to_float(indoor_rh_var.get())
+                        if t is None or rh is None:
+                            indoor_abs_var.set('')
+                        else:
+                            w = humidity_ratio(float(t), float(rh) / 100.0)
+                            if w is None:
+                                indoor_abs_var.set('')
+                            else:
+                                # convert kg/kg -> g/kg
+                                indoor_abs_var.set(f"{w*1000.0:.2f}")
+                    except Exception:
+                        indoor_abs_var.set('')
+                    # redraw chart
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+
+                def update_indoor_w_abs(*_a):
+                    try:
+                        t = to_float(indoor_w_t_var.get())
+                        rh = to_float(indoor_w_rh_var.get())
+                        if t is None or rh is None:
+                            indoor_w_abs_var.set('')
+                        else:
+                            w = humidity_ratio(float(t), float(rh) / 100.0)
+                            if w is None:
+                                indoor_w_abs_var.set('')
+                            else:
+                                indoor_w_abs_var.set(f"{w*1000.0:.2f}")
+                    except Exception:
+                        indoor_w_abs_var.set('')
+                    # redraw chart
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+                    except Exception:
+                        indoor_w_abs_var.set('')
+
+                indoor_t_var.trace_add('write', lambda *a: (sync_summer_to_winter(), update_indoor_abs()))
+                indoor_rh_var.trace_add('write', lambda *a: (sync_summer_to_winter(), update_indoor_abs()))
+                indoor_w_t_var.trace_add('write', lambda *a: update_indoor_w_abs())
+                indoor_w_rh_var.trace_add('write', lambda *a: update_indoor_w_abs())
+                
+                # Note: initial absolute humidity values computed in _initial_recompute (after humidity_ratio defined)
+            except Exception:
+                pass
+
+            # ensure initial state reflects "동절기 조건 동일"
+            on_same_toggle()
+            # pack the indoor frame before the main form frame
+            try:
+                indoor_frame.pack(fill=tk.X, padx=10, pady=(6,0), before=frm)
+            except Exception:
+                indoor_frame.pack(fill=tk.X, padx=10, pady=(6,0))
+
+            # Add a canvas on the right to show a psychrometric chart
+            chart_canvas = tk.Canvas(chart_frame, bg='#1a1a1a', bd=1, relief='sunken')
+            # fill the chart_frame
+            chart_canvas.pack(fill='both', expand=True)
+
+            ent_coil_rh = labeled_entry(frm, 6, '코일통과 후 RH (%RH):', coil_rh_var)
             # LAT display (read-only)
-            tk.Label(frm, text='LAT (℃):').grid(row=6, column=0, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='LAT (℃):').grid(row=7, column=0, sticky='w', padx=4, pady=4)
             ent_lat_display = tk.Entry(frm, textvariable=lat_var, width=18, state='readonly')
-            ent_lat_display.grid(row=6, column=1, sticky='w', padx=4, pady=4)
+            ent_lat_display.grid(row=7, column=1, sticky='w', padx=4, pady=4)
             # Coil-exit enthalpy at LAT (read-only)
             coil_ent_var = tk.StringVar()
-            tk.Label(frm, text='코일 통과 후 엔탈피 (kcal/kg):').grid(row=7, column=0, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='코일 통과 후 엔탈피 (kcal/kg):').grid(row=8, column=0, sticky='w', padx=4, pady=4)
             ent_coil_ent = tk.Entry(frm, textvariable=coil_ent_var, width=18, state='readonly')
-            ent_coil_ent.grid(row=7, column=1, sticky='w', padx=4, pady=4)
+            ent_coil_ent.grid(row=8, column=1, sticky='w', padx=4, pady=4)
             # Delta T display (read-only)
-            tk.Label(frm, text='ΔT (℃):').grid(row=8, column=0, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='ΔT (℃):').grid(row=9, column=0, sticky='w', padx=4, pady=4)
             ent_delta_display = tk.Entry(frm, textvariable=delta_var, width=18, state='readonly')
-            ent_delta_display.grid(row=8, column=1, sticky='w', padx=4, pady=4)
+            ent_delta_display.grid(row=9, column=1, sticky='w', padx=4, pady=4)
+            # AHU-design delta (ΔT - 0.3) display - placed between ΔT and 온도차 풍량
+            calc_delta_var = tk.StringVar()
+            tk.Label(frm, text='공조기 산정용 온도차(℃, △T - 0.3 )').grid(row=10, column=0, sticky='w', padx=4, pady=4)
+            ent_calc_delta = tk.Entry(frm, textvariable=calc_delta_var, width=18, state='readonly')
+            ent_calc_delta.grid(row=10, column=1, sticky='w', padx=4, pady=4)
             # AHU airflow display (read-only) computed from total sensible and delta T
             flow_var = tk.StringVar()
-            tk.Label(frm, text='공조기 풍량 (m3/hr):').grid(row=9, column=0, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='온도차(△T) 풍량 (m3/hr):').grid(row=11, column=0, sticky='w', padx=4, pady=4)
             ent_flow_display = tk.Entry(frm, textvariable=flow_var, width=18, state='readonly')
-            ent_flow_display.grid(row=9, column=1, sticky='w', padx=4, pady=4)
-            # AHU-design delta (ΔT - 0.3) display and explanation
+            ent_flow_display.grid(row=11, column=1, sticky='w', padx=4, pady=4)
+            # AHU-design delta margin flow (supply flow)
             margin_flow_var = tk.StringVar()
             # rename to 급기풍량 (supply flow)
-            tk.Label(frm, text='급기풍량 (m3/hr):').grid(row=12, column=0, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='급기풍량 (m3/hr):').grid(row=13, column=0, sticky='w', padx=4, pady=4)
             ent_margin_flow = tk.Entry(frm, textvariable=margin_flow_var, width=18, state='readonly')
-            ent_margin_flow.grid(row=12, column=1, sticky='w', padx=4, pady=4)
+            ent_margin_flow.grid(row=13, column=1, sticky='w', padx=4, pady=4)
             # Outdoor air input (accept number or percent)
-            outdoor_var = tk.StringVar()
-            tk.Label(frm, text='외기량 (m3/hr 또는 % 입력 가능):').grid(row=13, column=0, sticky='w', padx=4, pady=4)
+            outdoor_var = tk.StringVar(value='0')
+            tk.Label(frm, text='외기량 (m3/hr 또는 % 입력 가능):').grid(row=14, column=0, sticky='w', padx=4, pady=4)
             ent_outdoor = tk.Entry(frm, textvariable=outdoor_var, width=18)
-            ent_outdoor.grid(row=13, column=1, sticky='w', padx=4, pady=4)
+            ent_outdoor.grid(row=14, column=1, sticky='w', padx=4, pady=4)
+            # inline note for outdoor conversion messages (non-modal)
+            outdoor_note_var = tk.StringVar()
+            outdoor_note_lbl = tk.Label(frm, textvariable=outdoor_note_var, fg='brown')
+            outdoor_note_lbl.grid(row=14, column=2, sticky='w', padx=4, pady=4)
             # Return air (회수풍량) display (read-only)
             return_flow_var = tk.StringVar()
-            tk.Label(frm, text='회수풍량 (m3/hr):').grid(row=14, column=0, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='회수풍량 (m3/hr):').grid(row=15, column=0, sticky='w', padx=4, pady=4)
             ent_return_flow = tk.Entry(frm, textvariable=return_flow_var, width=18, state='readonly')
-            ent_return_flow.grid(row=14, column=1, sticky='w', padx=4, pady=4)
+            ent_return_flow.grid(row=15, column=1, sticky='w', padx=4, pady=4)
             # Mixed temperature and enthalpy display
             mix_temp_var = tk.StringVar()
             mix_ent_var = tk.StringVar()
-            tk.Label(frm, text='혼합온도 (℃):').grid(row=15, column=0, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='혼합온도 (℃):').grid(row=16, column=0, sticky='w', padx=4, pady=4)
             ent_mix_temp = tk.Entry(frm, textvariable=mix_temp_var, width=18, state='readonly')
-            ent_mix_temp.grid(row=15, column=1, sticky='w', padx=4, pady=4)
-            tk.Label(frm, text='혼합엔탈피 (kcal/kg):').grid(row=16, column=0, sticky='w', padx=4, pady=4)
+            ent_mix_temp.grid(row=16, column=1, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='혼합엔탈피 (kcal/kg):').grid(row=17, column=0, sticky='w', padx=4, pady=4)
             ent_mix_ent = tk.Entry(frm, textvariable=mix_ent_var, width=18, state='readonly')
-            ent_mix_ent.grid(row=16, column=1, sticky='w', padx=4, pady=4)
+            ent_mix_ent.grid(row=17, column=1, sticky='w', padx=4, pady=4)
+            # Chilled coil capacity (kcal/hr) with 10% margin (label changed to 냉방코일용량)
+            coil_cap_var = tk.StringVar()
+            tk.Label(frm, text='냉방코일용량 (kcal/hr, 10%가산):').grid(row=18, column=0, sticky='w', padx=4, pady=4)
+            ent_coil_cap = tk.Entry(frm, textvariable=coil_cap_var, width=18, state='readonly')
+            ent_coil_cap.grid(row=18, column=1, sticky='w', padx=4, pady=4)
+            # Heating coil capacity (kcal/hr) with 10% margin (placed below chilled water capacity)
+            heat_cap_var = tk.StringVar()
+            tk.Label(frm, text='난방코일용량 (kcal/hr, 10%가산):').grid(row=19, column=0, sticky='w', padx=4, pady=4)
+            ent_heat_cap = tk.Entry(frm, textvariable=heat_cap_var, width=18, state='readonly')
+            ent_heat_cap.grid(row=19, column=1, sticky='w', padx=4, pady=4)
+            # Humidification capacity (kg/hr) - placed after heating coil capacity
+            humid_cap_var = tk.StringVar()
+            tk.Label(frm, text='가습용량 (kg/hr):').grid(row=20, column=0, sticky='w', padx=4, pady=4)
+            ent_humid_cap = tk.Entry(frm, textvariable=humid_cap_var, width=18, state='readonly')
+            ent_humid_cap.grid(row=20, column=1, sticky='w', padx=4, pady=4)
+            
+            # generic commit handler: when an entry is committed (Enter or focus lost)
+            # IMPORTANT: Define this FIRST so other handlers can call it
+            def process_entry_commit(event=None):
+                # run the common recompute chain; swallowing exceptions to keep UI robust
+                try:
+                    recompute_outdoor_props()
+                except Exception:
+                    pass
+                try:
+                    recompute_frac()
+                except Exception:
+                    pass
+                try:
+                    update_return_air()
+                except Exception:
+                    pass
+                try:
+                    update_mixed_props()
+                except Exception:
+                    pass
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+                try:
+                    compute_humid_capacity()
+                except Exception:
+                    pass
+                try:
+                    draw_psychrometric()
+                except Exception:
+                    pass
+
             # when focus leaves, if value contains % convert using margin_flow_var
             def process_outdoor_focusout(event=None):
                 try:
@@ -6748,7 +7003,100 @@ class ResizableRectApp:
 
             try:
                 ent_outdoor.bind('<FocusOut>', process_outdoor_focusout)
-                ent_outdoor.bind('<Return>', lambda e: process_outdoor_focusout())
+                # when Enter pressed in outdoor entry, first convert %->m3/hr then run full recompute
+                def handle_outdoor_return(event=None):
+                    # Run a full recompute first so margin_flow_var / flow_var may be available
+                    try:
+                        process_entry_commit()
+                    except Exception:
+                        pass
+
+                    raw = (outdoor_var.get() or '').strip()
+                    if not raw:
+                        # nothing to do
+                        return
+
+                    # If the user entered a percent, try to convert to m3/hr
+                    if '%' in raw:
+                        try:
+                            p = raw.replace('%', '').strip()
+                            p_num = to_float(p)
+                        except Exception:
+                            p_num = None
+
+                        if p_num is None:
+                            # invalid percent, leave as-is but run recompute
+                            process_entry_commit()
+                            return
+
+                        # Prefer margin_flow_var (design), fall back to AHU flow
+                        base = to_float(margin_flow_var.get())
+                        if base is None or float(base) <= 0:
+                            base = to_float(flow_var.get())
+
+                        if base is None or float(base) <= 0:
+                            # Can't compute conversion: set inline note so user knows why
+                            try:
+                                outdoor_note_var.set('급기풍량이 계산되지 않아 % 변환 불가')
+                            except Exception:
+                                pass
+                            # run recompute to ensure UI updated
+                            try:
+                                process_entry_commit()
+                            except Exception:
+                                pass
+                            return
+
+                        # perform conversion and update entry
+                        try:
+                            val = float(base) * (float(p_num) / 100.0)
+                            val_ceil = int(math.ceil(val / 100.0) * 100)
+                            outdoor_var.set(f"{val_ceil:,}")
+                        except Exception:
+                            # if conversion failed, leave value and let follow-up handlers run
+                            try:
+                                outdoor_note_var.set('외기 변환 중 오류')
+                            except Exception:
+                                pass
+                            pass
+
+                    # ensure follow-up recompute to refresh dependent fields
+                    try:
+                        process_entry_commit()
+                    except Exception:
+                        pass
+                    # clear inline note if conversion succeeded or recompute ran
+                    try:
+                        # if the current outdoor_var value no longer contains '%', clear note
+                        if '%' not in (outdoor_var.get() or ''):
+                            outdoor_note_var.set('')
+                    except Exception:
+                        pass
+
+                ent_outdoor.bind('<Return>', handle_outdoor_return)
+            except Exception:
+                pass
+
+            # bind Enter and FocusOut on commonly edited entries so committing updates everything
+            try:
+                for ent in (win_db_entry, win_rh_entry, sum_db_entry, sum_rh_entry,
+                            ent_sens, ent_lat, ent_indoor_heat,
+                            ent_indoor_t_entry, ent_indoor_rh_entry,
+                            ent_indoor_w_t_entry, ent_indoor_w_rh_entry,
+                            ent_coil_rh):  # ent_outdoor removed - has custom handler
+                    try:
+                        ent.bind('<Return>', lambda e, fn=process_entry_commit: fn())
+                    except Exception:
+                        pass
+                    try:
+                        ent.bind('<FocusOut>', lambda e, fn=process_entry_commit: fn())
+                    except Exception:
+                        pass
+                    try:
+                        # realtime on any key change
+                        ent.bind('<KeyRelease>', lambda e, fn=process_entry_commit: fn())
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -6796,19 +7144,50 @@ class ResizableRectApp:
                         return_flow_var.set('')
                     except Exception:
                         pass
-            # AHU-design delta (ΔT - 0.3) display and explanation
-            calc_delta_var = tk.StringVar()
-            tk.Label(frm, text='공조기 산정용 온도차 (℃):').grid(row=9, column=0, sticky='w', padx=4, pady=4)
-            ent_calc_delta = tk.Entry(frm, textvariable=calc_delta_var, width=18, state='readonly')
-            ent_calc_delta.grid(row=9, column=1, sticky='w', padx=4, pady=4)
-            # explanation: this value = ΔT - 0.3
-            expl = tk.Label(frm, text='(설명: 온도차에서 0.3을 뺀 값)')
-            expl.grid(row=10, column=0, columnspan=2, sticky='w', padx=4, pady=(0,6))
 
             # bind key events to ensure recompute on typing (robust across platforms)
             try:
-                ent_sens.bind('<KeyRelease>', lambda e: recompute_frac())
+                # live-format 전체현열량 (total sensible) with thousand separators on key release
+                def live_format_total(event=None):
+                    try:
+                        s = total_sens_var.get()
+                        if not s:
+                            return
+                        st = str(s).replace(',', '').replace('\u00A0', '').strip()
+                        if st == '':
+                            return
+                        v = float(st)
+                        # set as integer with thousand separators
+                        total_sens_var.set(f"{int(round(v)):,.0f}")
+                        # update dependent values
+                        try:
+                            recompute_frac()
+                        except Exception:
+                            pass
+                    except Exception:
+                        return
+
+                ent_sens.bind('<KeyRelease>', live_format_total)
                 ent_lat.bind('<KeyRelease>', lambda e: recompute_frac())
+                # live-format 전체잠열량 as well
+                def live_format_lat(event=None):
+                    try:
+                        s = total_lat_var.get()
+                        if not s:
+                            return
+                        st = str(s).replace(',', '').replace('\u00A0', '').strip()
+                        if st == '':
+                            return
+                        v = float(st)
+                        total_lat_var.set(f"{int(round(v)):,.0f}")
+                        try:
+                            recompute_frac()
+                        except Exception:
+                            pass
+                    except Exception:
+                        return
+
+                ent_lat.bind('<KeyRelease>', live_format_lat)
                 ent_sens.bind('<FocusOut>', lambda e: format_total_with_commas(total_sens_var))
                 ent_lat.bind('<FocusOut>', lambda e: format_total_with_commas(total_lat_var))
             except Exception:
@@ -6821,6 +7200,21 @@ class ResizableRectApp:
                 ent_indoor_t.bind('<KeyRelease>', lambda e: recompute_lat())
                 ent_indoor_rh.bind('<KeyRelease>', lambda e: recompute_lat())
                 ent_coil_rh.bind('<KeyRelease>', lambda e: recompute_lat())
+                # also bind 동절기 inputs to recompute heating/cooling in real time
+                try:
+                    indoor_w_t_var.trace('w', lambda *a: (recompute_lat(), update_mixed_props()))
+                    indoor_w_rh_var.trace('w', lambda *a: (recompute_lat(), update_mixed_props()))
+                except Exception:
+                    try:
+                        indoor_w_t_var.trace_add('write', lambda *a: (recompute_lat(), update_mixed_props()))
+                        indoor_w_rh_var.trace_add('write', lambda *a: (recompute_lat(), update_mixed_props()))
+                    except Exception:
+                        pass
+                try:
+                    ent_indoor_w_t_entry.bind('<KeyRelease>', lambda e: (recompute_lat(), update_mixed_props()))
+                    ent_indoor_w_rh_entry.bind('<KeyRelease>', lambda e: (recompute_lat(), update_mixed_props()))
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -6892,7 +7286,7 @@ class ResizableRectApp:
 
             def recompute_outdoor_props(*a):
                 try:
-                    # winter
+                    # winter: compute/display if numeric inputs are present
                     try:
                         t_w = to_float(win_db_var.get())
                         rh_w = to_float(win_rh_var.get())
@@ -6905,7 +7299,6 @@ class ResizableRectApp:
                             if h_w is None:
                                 win_h_var.set('')
                             else:
-                                # show with 2 decimal places
                                 win_h_var.set(f"{h_w:.2f}")
                             if w_w is None:
                                 win_abs_var.set('')
@@ -6914,7 +7307,7 @@ class ResizableRectApp:
                     except Exception:
                         win_h_var.set('')
                         win_abs_var.set('')
-                    # summer
+                    # summer: compute/display if numeric inputs are present
                     try:
                         t_s = to_float(sum_db_var.get())
                         rh_s = to_float(sum_rh_var.get())
@@ -6935,11 +7328,73 @@ class ResizableRectApp:
                     except Exception:
                         sum_h_var.set('')
                         sum_abs_var.set('')
+                    # redraw psychrometric chart
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
+            def compute_humid_capacity():
+                try:
+                    # parse outdoor (외기량) in m3/hr — accept numeric or percent (use margin_flow if percent)
+                    raw = (outdoor_var.get() or '').strip()
+                    outdoor_m3 = None
+                    if raw == '':
+                        outdoor_m3 = 0.0
+                    elif '%' in raw:
+                        # prefer margin_flow then flow
+                        base = to_float(margin_flow_var.get())
+                        if base is None or float(base) <= 0:
+                            base = to_float(flow_var.get())
+                        p = raw.replace('%', '').strip()
+                        pnum = to_float(p)
+                        if base is None or pnum is None:
+                            outdoor_m3 = None
+                        else:
+                            outdoor_m3 = float(base) * (float(pnum) / 100.0)
+                    else:
+                        v = to_float(raw.replace(',', ''))
+                        outdoor_m3 = float(v) if v is not None else None
+
+                    # get abs humidity values in g/kg
+                    indoor_w_abs_g = to_float(indoor_w_abs_var.get())
+                    win_abs_g = to_float(win_abs_var.get())
+                    if outdoor_m3 is None or indoor_w_abs_g is None or win_abs_g is None:
+                        humid_cap_var.set('')
+                        return
+
+                    # convert g/kg diff to kg/kg
+                    diff_kg_per_kg = (float(indoor_w_abs_g) - float(win_abs_g)) / 1000.0
+                    # formula: 1.2 * outdoor_m3 * diff (kg/hr)
+                    humid_kghr = 1.2 * float(outdoor_m3) * diff_kg_per_kg
+                    humid_cap_var.set(f"{humid_kghr:.2f}")
+                except Exception:
+                    try:
+                        humid_cap_var.set('')
+                    except Exception:
+                        pass
+
+            # wire traces for outdoor condition inputs
             # wire traces for outdoor condition inputs
             try:
+                # mark touched flags on key activity and recompute only when touched
+                def _mark_win_touched(evt=None):
+                    nonlocal win_touched
+                    win_touched = True
+                    recompute_outdoor_props()
+
+                def _mark_sum_touched(evt=None):
+                    nonlocal sum_touched
+                    sum_touched = True
+                    recompute_outdoor_props()
+
+                win_db_entry.bind('<KeyRelease>', _mark_win_touched)
+                win_rh_entry.bind('<KeyRelease>', _mark_win_touched)
+                sum_db_entry.bind('<KeyRelease>', _mark_sum_touched)
+                sum_rh_entry.bind('<KeyRelease>', _mark_sum_touched)
+                # also support trace for programmatic changes
                 win_db_var.trace('w', lambda *a: recompute_outdoor_props())
                 win_rh_var.trace('w', lambda *a: recompute_outdoor_props())
                 sum_db_var.trace('w', lambda *a: recompute_outdoor_props())
@@ -6950,6 +7405,74 @@ class ResizableRectApp:
                     win_rh_var.trace_add('write', lambda *a: recompute_outdoor_props())
                     sum_db_var.trace_add('write', lambda *a: recompute_outdoor_props())
                     sum_rh_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                except Exception:
+                    pass
+            # compute once on open if defaults present; schedule after dialog appears
+            try:
+                # initial recompute chain after dialog appears: outdoor props, return air, mixed props, LAT
+                def _initial_recompute():
+                    try:
+                        recompute_outdoor_props()
+                    except Exception:
+                        pass
+                    try:
+                        update_return_air()
+                    except Exception:
+                        pass
+                    try:
+                        update_mixed_props()
+                    except Exception:
+                        pass
+                    try:
+                        recompute_lat()
+                    except Exception:
+                        pass
+                    # compute initial absolute humidity values for indoor conditions
+                    try:
+                        update_indoor_abs()
+                    except Exception:
+                        pass
+                    try:
+                        update_indoor_w_abs()
+                    except Exception:
+                        pass
+                    try:
+                        compute_humid_capacity()
+                    except Exception:
+                        pass
+                    # draw psychrometric chart after all computations
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+
+                dlg.after(50, _initial_recompute)
+            except Exception:
+                try:
+                    recompute_outdoor_props()
+                except Exception:
+                    pass
+                try:
+                    update_return_air()
+                except Exception:
+                    pass
+                try:
+                    update_mixed_props()
+                except Exception:
+                    pass
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            # realtime bindings: when supply/outdoor change, update return/mixed/coils
+            try:
+                margin_flow_var.trace('w', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
+                outdoor_var.trace('w', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
+            except Exception:
+                try:
+                    margin_flow_var.trace_add('write', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
+                    outdoor_var.trace_add('write', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
                 except Exception:
                     pass
 
@@ -7029,6 +7552,72 @@ class ResizableRectApp:
                         # mass-weighted average enthalpy (assuming volumetric flows proportional to mass flows)
                         mixed_h = (float(outdoor_m3) * float(h_out_kcal) + float(return_m3) * float(h_ret_kcal)) / float(supply)
                         mix_ent_var.set(f"{mixed_h:.3f}")
+                        # compute chilled water coil capacity = 1.2 * supply * (mixed_ent - coil_ent)
+                        try:
+                            # supply (m3/hr)
+                            supply_num = float(supply)
+                            # mixed enthalpy (kcal/kg)
+                            mixed_ent_val = float(mixed_h)
+                            # coil exit enthalpy (kcal/kg) from coil_ent_var
+                            coil_ent_val = None
+                            try:
+                                coil_ent_val = float(coil_ent_var.get()) if coil_ent_var.get() else None
+                            except Exception:
+                                coil_ent_val = None
+                            if coil_ent_val is None:
+                                coil_cap_var.set('')
+                            else:
+                                cap = 1.2 * supply_num * (mixed_ent_val - float(coil_ent_val))
+                                # ensure non-negative
+                                cap = max(0.0, cap)
+                                # apply 10% margin (1.1x)
+                                cap = cap * 1.1
+                                # floor to nearest 1000 (내림천단위)
+                                cap = math.floor(cap / 1000.0) * 1000.0
+                                if cap <= 0:
+                                    coil_cap_var.set('0')
+                                else:
+                                    coil_cap_var.set(f"{int(cap):,}")
+                                # compute coil-through temperature from indoor heat load:
+                                # coil_T = indoor_temp + (indoor_heat_load / 1.2 / 0.24 / supply)
+                                try:
+                                    # use 동절기 건구온도 for coil-through calculation
+                                    indoor_temp = to_float(indoor_w_t_var.get())
+                                    indoor_heat_load = to_float(indoor_heat_load_var.get())
+                                    supply_val = float(supply)
+                                    coil_T = None
+                                    if indoor_temp is None or indoor_heat_load is None or supply_val == 0:
+                                        coil_T = None
+                                    else:
+                                        coil_T = float(indoor_temp) + (float(indoor_heat_load) / 1.2 / 0.24 / float(supply_val))
+                                except Exception:
+                                    coil_T = None
+
+                                # compute mixed winter temp (weighted) and heating coil capacity
+                                try:
+                                    winter_db = to_float(win_db_var.get())
+                                    if winter_db is None or coil_T is None:
+                                        heat_cap_var.set('')
+                                    else:
+                                        try:
+                                            # mixed winter temp uses 동절기 indoor temp (indoor_w_t_var)
+                                            mixed_winter_T = (float(outdoor_m3) * float(winter_db) + float(return_m3) * float(to_float(indoor_w_t_var.get()) if to_float(indoor_w_t_var.get()) is not None else 0.0)) / float(supply)
+                                        except Exception:
+                                            mixed_winter_T = None
+                                        if mixed_winter_T is None:
+                                            heat_cap_var.set('')
+                                        else:
+                                            heat_cap = 1.2 * 0.24 * float(supply) * (float(coil_T) - float(mixed_winter_T)) * 1.1
+                                            heat_cap = max(0.0, heat_cap)
+                                            heat_cap = math.floor(heat_cap / 1000.0) * 1000.0
+                                            if heat_cap <= 0:
+                                                heat_cap_var.set('0')
+                                            else:
+                                                heat_cap_var.set(f"{int(heat_cap):,}")
+                                except Exception:
+                                    heat_cap_var.set('')
+                        except Exception:
+                            coil_cap_var.set('')
                     except Exception:
                         mix_ent_var.set('')
                 except Exception:
@@ -7205,6 +7794,165 @@ class ResizableRectApp:
                         f_lo = f_mid
                 return 0.5 * (lo + hi)
 
+            # draw comprehensive psychrometric chart on the canvas (Tkinter-only implementation)
+            def draw_psychrometric():
+                try:
+                    cvs = chart_canvas
+                    cvs.delete('all')
+                    cvs.update_idletasks()
+                    w = cvs.winfo_width()
+                    h = cvs.winfo_height()
+                    if w <= 1 or h <= 1:
+                        w, h = 700, 650
+                    
+                    # dark background similar to professional chart
+                    cvs.create_rectangle(0, 0, w, h, fill='#1a1a1a', outline='')
+                    
+                    margin_l, margin_r, margin_t, margin_b = 50, 30, 30, 40
+                    plot_w = w - margin_l - margin_r
+                    plot_h = h - margin_t - margin_b
+                    
+                    # chart range: temp -10~40°C, abs humidity 0~25 g/kg
+                    xmin, xmax = -10.0, 40.0
+                    ymin, ymax = 0.0, 25.0
+                    
+                    def xpix(T):
+                        return margin_l + (T - xmin) / (xmax - xmin) * plot_w
+                    def ypix(gpk):
+                        return margin_t + (ymax - gpk) / (ymax - ymin) * plot_h
+                    
+                    # title
+                    cvs.create_text(w/2, 15, text='습공기 선도', font=('Arial', 11, 'bold'), fill='white')
+                    
+                    # grid: vertical temperature lines (every 5°C)
+                    for T in range(-10, 41, 5):
+                        x = xpix(T)
+                        cvs.create_line(x, margin_t, x, margin_t + plot_h, fill='#444444', width=1)
+                        cvs.create_text(x, margin_t + plot_h + 10, text=str(T), fill='white', font=('Arial', 8))
+                    cvs.create_text(margin_l + plot_w/2, h - 10, text='건구온도 (℃)', fill='white', font=('Arial', 9))
+                    
+                    # horizontal abs humidity lines (every 5 g/kg)
+                    for gpk in range(0, 26, 5):
+                        y = ypix(gpk)
+                        cvs.create_line(margin_l, y, margin_l + plot_w, y, fill='#444444', width=1)
+                        cvs.create_text(margin_l - 10, y, text=str(gpk), fill='white', font=('Arial', 8), anchor='e')
+                    cvs.create_text(20, margin_t + plot_h/2, text='절대습도 (g/kg)', fill='white', font=('Arial', 9), angle=90)
+                    
+                    # saturation curve (100% RH) - bold
+                    pts = []
+                    T = xmin
+                    while T <= xmax:
+                        try:
+                            w_sat = humidity_ratio(T, 1.0)
+                            if w_sat is not None and w_sat * 1000.0 <= ymax:
+                                pts.append((xpix(T), ypix(w_sat * 1000.0)))
+                        except:
+                            pass
+                        T += 0.5
+                    for i in range(len(pts) - 1):
+                        cvs.create_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], fill='#00aaff', width=2)
+                    
+                    # RH curves (10%, 20%, ..., 90%)
+                    for RH in [10, 20, 30, 40, 50, 60, 70, 80, 90]:
+                        pts = []
+                        T = xmin
+                        while T <= xmax:
+                            try:
+                                w_rh = humidity_ratio(T, RH / 100.0)
+                                if w_rh is not None and w_rh * 1000.0 <= ymax:
+                                    pts.append((xpix(T), ypix(w_rh * 1000.0)))
+                            except:
+                                pass
+                            T += 1.0
+                        for i in range(len(pts) - 1):
+                            cvs.create_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], fill='#666666', width=1)
+                        # label RH curve
+                        if len(pts) > len(pts)//2:
+                            try:
+                                mid = pts[len(pts)//2]
+                                cvs.create_text(mid[0], mid[1]-8, text=f'{RH}%', fill='#aaaaaa', font=('Arial', 7))
+                            except:
+                                pass
+                    
+                    # enthalpy lines (diagonal lines) - approximate constant enthalpy as diagonal from top-left to bottom-right
+                    # enthalpy h = cp*T + w*(L + cpv*T); for simplicity draw lines of constant h in kJ/kg
+                    for h_kj in range(10, 100, 10):
+                        pts = []
+                        # solve for points: given h_kj, find (T, w) pairs
+                        for T in range(-10, 41, 2):
+                            try:
+                                # h_kj = 1.005*T + w*(2501 + 1.86*T)
+                                # solve for w: w = (h_kj - 1.005*T) / (2501 + 1.86*T)
+                                denom = 2501.0 + 1.86 * T
+                                if denom != 0:
+                                    w_kg = (h_kj - 1.005 * T) / denom
+                                    if w_kg >= 0 and w_kg * 1000.0 <= ymax:
+                                        pts.append((xpix(T), ypix(w_kg * 1000.0)))
+                            except:
+                                pass
+                        for i in range(len(pts) - 1):
+                            cvs.create_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], fill='#555555', width=1, dash=(2, 2))
+                    
+                    # plot calculated points
+                    def plot_point(T, gpk, label, color='red', size=5):
+                        try:
+                            if T < xmin or T > xmax or gpk < ymin or gpk > ymax:
+                                return
+                            x, y = xpix(T), ypix(gpk)
+                            cvs.create_oval(x-size, y-size, x+size, y+size, fill=color, outline='white', width=1)
+                            cvs.create_text(x+15, y-10, text=label, fill=color, font=('Arial', 8, 'bold'), anchor='w')
+                        except:
+                            pass
+                    
+                    # winter outdoor
+                    try:
+                        t_w = to_float(win_db_var.get())
+                        w_w_g = to_float(win_abs_var.get())
+                        if t_w is not None and w_w_g is not None:
+                            plot_point(float(t_w), float(w_w_g), '외기(동)', color='#00ccff')
+                    except:
+                        pass
+                    
+                    # summer outdoor
+                    try:
+                        t_s = to_float(sum_db_var.get())
+                        w_s_g = to_float(sum_abs_var.get())
+                        if t_s is not None and w_s_g is not None:
+                            plot_point(float(t_s), float(w_s_g), '외기(하)', color='#ff6600')
+                    except:
+                        pass
+                    
+                    # indoor (summer)
+                    try:
+                        it = to_float(indoor_t_var.get())
+                        iw = to_float(indoor_abs_var.get())
+                        if it is not None and iw is not None:
+                            plot_point(float(it), float(iw), '실내(하)', color='#00ff00')
+                    except:
+                        pass
+                    
+                    # indoor (winter)
+                    try:
+                        iwt = to_float(indoor_w_t_var.get())
+                        iww = to_float(indoor_w_abs_var.get())
+                        if iwt is not None and iww is not None:
+                            plot_point(float(iwt), float(iww), '실내(동)', color='#ffff00')
+                    except:
+                        pass
+                    
+                    # LAT point
+                    try:
+                        lat = to_float(lat_var.get())
+                        crh = to_float(coil_rh_var.get())
+                        if lat is not None and crh is not None:
+                            w_coil = humidity_ratio(lat, float(crh) / 100.0)
+                            if w_coil is not None:
+                                plot_point(float(lat), w_coil * 1000.0, 'LAT', color='#ff00ff')
+                    except:
+                        pass
+                except Exception:
+                    pass
+
             def recompute_lat(*a):
                 try:
                     it = to_float(indoor_t_var.get())
@@ -7298,6 +8046,11 @@ class ResizableRectApp:
                         margin_flow_var.set('')
                     try:
                         update_mixed_props()
+                    except Exception:
+                        pass
+                    # redraw psychrometric chart after all updates
+                    try:
+                        draw_psychrometric()
                     except Exception:
                         pass
                 except Exception:
@@ -7444,7 +8197,12 @@ class ResizableRectApp:
                 dlg.destroy()
 
             btnf = tk.Frame(dlg)
-            btnf.pack(fill=tk.X, pady=(6,6))
+            # pack at bottom to ensure buttons remain visible when content expands
+            btnf.pack(side='bottom', fill=tk.X, pady=(6,6))
+            try:
+                dlg.lift()
+            except Exception:
+                pass
             okb = tk.Button(btnf, text='확인', command=on_ok)
             okb.pack(side=tk.LEFT, padx=6)
             cb = tk.Button(btnf, text='취소', command=on_cancel)
