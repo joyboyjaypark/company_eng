@@ -1620,23 +1620,30 @@ class Palette:
                             except Exception:
                                 pass
                             try:
-                                # if this item is assigned to any HVAC, keep it red; else clear
-                                assigned = False
+                                # Check if item is applied (blue) - if so, restore blue; if assigned yellow, restore yellow; else clear
                                 try:
-                                    for m in getattr(self.app, 'hvac_map', {}).values():
-                                        try:
-                                            ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
-                                        except Exception:
-                                            ids_set = set(m.get('ids', set()) or set())
-                                        if iid in ids_set:
-                                            assigned = True
-                                            break
+                                    applied_diffusers = set(getattr(self.app, '_supply_assigned', set()) or set())
                                 except Exception:
-                                    assigned = False
-                                if assigned:
-                                    self.canvas.itemconfigure(iid, outline='red', width=2)
+                                    applied_diffusers = set()
+                                if iid in applied_diffusers:
+                                    self.canvas.itemconfigure(iid, outline='blue', width=2)
                                 else:
-                                    self.canvas.itemconfigure(iid, outline='')
+                                    assigned = False
+                                    try:
+                                        for m in getattr(self.app, 'hvac_map', {}).values():
+                                            try:
+                                                ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
+                                            except Exception:
+                                                ids_set = set(m.get('ids', set()) or set())
+                                            if iid in ids_set:
+                                                assigned = True
+                                                break
+                                    except Exception:
+                                        assigned = False
+                                    if assigned:
+                                        self.canvas.itemconfigure(iid, outline='yellow', width=2)
+                                    else:
+                                        self.canvas.itemconfigure(iid, outline='')
                             except Exception:
                                 pass
                         else:
@@ -1645,23 +1652,8 @@ class Palette:
                             except Exception:
                                 pass
                             try:
-                                # when user selects via drag, show selected-but-unassigned as blue
-                                assigned = False
-                                try:
-                                    for m in getattr(self.app, 'hvac_map', {}).values():
-                                        try:
-                                            ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
-                                        except Exception:
-                                            ids_set = set(m.get('ids', set()) or set())
-                                        if iid in ids_set:
-                                            assigned = True
-                                            break
-                                except Exception:
-                                    assigned = False
-                                if assigned:
-                                    self.canvas.itemconfigure(iid, outline='red', width=2)
-                                else:
-                                    self.canvas.itemconfigure(iid, outline='blue')
+                                # when user selects via drag, show all selected items as red (temporary selection)
+                                self.canvas.itemconfigure(iid, outline='red', width=2)
                             except Exception:
                                 pass
                     else:
@@ -1669,24 +1661,9 @@ class Palette:
                             current_selected.add(iid)
                         except Exception:
                             pass
-                        # visually mark selection: blue if unassigned, red if assigned
+                        # visually mark all drag-selected items as red (temporary selection state)
                         try:
-                            assigned = False
-                            try:
-                                for m in getattr(self.app, 'hvac_map', {}).values():
-                                    try:
-                                        ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
-                                    except Exception:
-                                        ids_set = set(m.get('ids', set()) or set())
-                                    if iid in ids_set:
-                                        assigned = True
-                                        break
-                            except Exception:
-                                assigned = False
-                            if assigned:
-                                self.canvas.itemconfigure(iid, outline='red', width=2)
-                            else:
-                                self.canvas.itemconfigure(iid, outline='blue')
+                            self.canvas.itemconfigure(iid, outline='red', width=2)
                         except Exception:
                             pass
             # finalize selection set
@@ -1720,12 +1697,22 @@ class Palette:
             except Exception:
                 assigned_all = set()
 
+            try:
+                applied_diffusers = set(getattr(self.app, '_supply_assigned', set()) or set())
+            except Exception:
+                applied_diffusers = set()
+
             for iid in list(self.selected_points):
                 try:
-                    # if this item is assigned to any HVAC, leave it red; otherwise clear outline
-                    if iid in assigned_all:
+                    # if this item is applied, keep blue outline; if assigned to HVAC, restore yellow; otherwise clear
+                    if iid in applied_diffusers:
                         try:
-                            self.canvas.itemconfigure(iid, outline='red', width=2)
+                            self.canvas.itemconfigure(iid, outline='blue', width=2)
+                        except Exception:
+                            pass
+                    elif iid in assigned_all:
+                        try:
+                            self.canvas.itemconfigure(iid, outline='yellow', width=2)
                         except Exception:
                             pass
                     else:
@@ -6560,15 +6547,26 @@ class ResizableRectApp:
                             except Exception:
                                 # ignore errors when querying/deleting this item
                                 pass
-                        # clear highlighted outlines on this palette
+                        # clear highlighted outlines on this palette, but keep supply-assigned persistent
                         try:
+                            try:
+                                supply_assigned = set(getattr(self, '_supply_assigned', set()) or set())
+                            except Exception:
+                                supply_assigned = set()
                             for hid in list(getattr(self, '_hvac_highlighted', set())):
                                 try:
-                                    if hid in pal.canvas.find_all():
+                                    if hid in pal.canvas.find_all() and hid not in supply_assigned:
                                         pal.canvas.itemconfigure(hid, outline='')
                                 except Exception:
                                     pass
-                            self._hvac_highlighted.clear()
+                            # keep any supply-assigned ids in _hvac_highlighted
+                            try:
+                                self._hvac_highlighted = set(x for x in getattr(self, '_hvac_highlighted', set()) if x in supply_assigned)
+                            except Exception:
+                                try:
+                                    self._hvac_highlighted.clear()
+                                except Exception:
+                                    self._hvac_highlighted = set()
                         except Exception:
                             pass
                 except Exception:
@@ -8595,25 +8593,73 @@ class ResizableRectApp:
             except Exception:
                 assigned_all = set()
 
-            # iterate diffuser items tracked on palette (use tag 'diffuser' where possible)
+            # iterate diffuser and main_point items tracked on palette
             try:
                 candidates = list(palette.canvas.find_withtag('diffuser'))
+                # Also include main_points in the candidate list
+                try:
+                    for mp in palette.canvas.find_withtag('main_point'):
+                        if mp not in candidates:
+                            candidates.append(mp)
+                except Exception:
+                    pass
             except Exception:
                 candidates = list(palette.canvas.find_all())
 
+            # persistent applied diffusers set
+            try:
+                applied_diffusers = set(getattr(self, '_supply_assigned', set()) or set())
+            except Exception:
+                applied_diffusers = set()
+
+            # get active HVAC name to check if applied diffuser belongs to it
+            try:
+                active_hvac = getattr(self, '_active_hvac_name', None)
+            except Exception:
+                active_hvac = None
+
+            # build map of which diffusers belong to which HVAC
+            diffuser_to_hvac = {}
+            try:
+                for hvac_name, mapping in getattr(self, 'hvac_map', {}).items():
+                    if not mapping or not isinstance(mapping, dict):
+                        continue
+                    try:
+                        for did in mapping.get('ids', set()) or set():
+                            try:
+                                diffuser_to_hvac[int(did)] = hvac_name
+                            except Exception:
+                                diffuser_to_hvac[did] = hvac_name
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
             for iid in candidates:
                 try:
-                    if iid in assigned_all:
-                        # assigned: red outline
+                    # If item is applied (finalized), show yellow if it belongs to active HVAC, otherwise blue
+                    if iid in applied_diffusers:
                         try:
-                            palette.canvas.itemconfigure(iid, outline='red', width=2)
+                            belongs_to_active = (diffuser_to_hvac.get(iid) == active_hvac)
+                            if belongs_to_active:
+                                palette.canvas.itemconfigure(iid, outline='yellow', width=2)
+                            else:
+                                palette.canvas.itemconfigure(iid, outline='blue', width=2)
+                        except Exception:
+                            palette.canvas.itemconfigure(iid, outline='blue', width=2)
+                        continue
+
+                    if iid in assigned_all:
+                        # assigned but not applied: yellow outline
+                        try:
+                            palette.canvas.itemconfigure(iid, outline='yellow', width=2)
                         except Exception:
                             pass
                     else:
-                        # unassigned: if selected, blue; else clear
+                        # unassigned: if selected (temporary), red; else clear
                         try:
                             if getattr(palette, 'selected_points', None) and iid in getattr(palette, 'selected_points', set()):
-                                palette.canvas.itemconfigure(iid, outline='blue')
+                                palette.canvas.itemconfigure(iid, outline='red', width=2)
                             else:
                                 palette.canvas.itemconfigure(iid, outline='')
                         except Exception:
@@ -8899,6 +8945,7 @@ class ResizableRectApp:
             except Exception:
                 # fallback: nothing to do
                 pass
+            # Note: Blue outline will be applied after main point assignment completes
             # If this HVAC already has stored mapping on this palette, remove
             # any previously-created main-point markers (and their text labels)
             # before starting a new assignment. Do NOT delete diffuser items.
@@ -9046,31 +9093,56 @@ class ResizableRectApp:
                 return
             # clear previous highlights for this palette
             try:
+                # persistent supply-assigned set should not be cleared here
+                try:
+                    supply_assigned = set(getattr(self, '_supply_assigned', set()) or set())
+                except Exception:
+                    supply_assigned = set()
+                
+                # Build map of all assigned items to their HVAC systems
+                all_assigned_map = {}
+                try:
+                    for hvac_name, hvac_mapping in self.hvac_map.items():
+                        if hvac_mapping and isinstance(hvac_mapping, dict):
+                            for iid in hvac_mapping.get('ids', set()) or set():
+                                all_assigned_map[iid] = hvac_name
+                except Exception:
+                    pass
+                
+                # Restore outlines for previously highlighted items (includes main_points)
                 for iid in list(getattr(self, '_hvac_highlighted', set())):
                     try:
-                        # only clear items that still exist on this canvas
+                        # only process items that still exist on this canvas
                         if iid in rc.canvas.find_all():
-                            rc.canvas.itemconfigure(iid, outline='')
+                            # If applied (in supply_assigned), restore to blue
+                            if iid in supply_assigned:
+                                rc.canvas.itemconfigure(iid, outline='blue', width=2)
+                            # If assigned to some HVAC but not applied
+                            elif iid in all_assigned_map:
+                                # Will be set to yellow later if it belongs to the new HVAC
+                                rc.canvas.itemconfigure(iid, outline='')
+                            else:
+                                # Unassigned: clear outline
+                                rc.canvas.itemconfigure(iid, outline='')
                     except Exception:
                         pass
-                self._hvac_highlighted.clear()
+                
+                # Clear _hvac_highlighted set
+                try:
+                    self._hvac_highlighted.clear()
+                except Exception:
+                    self._hvac_highlighted = set()
             except Exception:
                 pass
             # Clear any existing point selection in the palette
+            # (selected_points only contains diffusers, not main_points)
             try:
-                if hasattr(rc, '_clear_point_selection'):
-                    rc._clear_point_selection()
-                else:
-                    # attempt to clear outlines and selected_points
-                    try:
-                        for sid in list(getattr(rc, 'selected_points', set())):
-                            try:
-                                rc.canvas.itemconfigure(sid, outline='')
-                            except Exception:
-                                pass
-                        rc.selected_points = set()
-                    except Exception:
-                        pass
+                # Get all currently selected points (diffusers only)
+                prev_selected = set(getattr(rc, 'selected_points', set()) or set())
+                
+                # Restore outlines for previously selected diffusers were already handled above
+                # in _hvac_highlighted loop, so just clear the set
+                rc.selected_points = set()
             except Exception:
                 pass
 
@@ -9126,11 +9198,23 @@ class ResizableRectApp:
             for iid in mapped_for_palette:
                 try:
                     if iid in rc.canvas.find_all():
-                        rc.canvas.itemconfigure(iid, outline='red', width=2)
+                        # Check if this item is a main_point (should not be added to selected_points)
                         try:
-                            rc.selected_points.add(iid)
+                            tags = rc.canvas.gettags(iid)
+                            is_main_point = 'main_point' in tags
                         except Exception:
-                            rc.selected_points = set([iid])
+                            is_main_point = False
+                        
+                        # Show all assigned items (diffusers and main_points) in yellow when their HVAC is selected
+                        rc.canvas.itemconfigure(iid, outline='yellow', width=2)
+                        
+                        if not is_main_point:
+                            # Only add diffusers to selected_points (not main_points)
+                            try:
+                                rc.selected_points.add(iid)
+                            except Exception:
+                                rc.selected_points = set([iid])
+                        
                         self._hvac_highlighted.add(iid)
                 except Exception:
                     pass
@@ -9289,6 +9373,7 @@ class ResizableRectApp:
                     # store mapping associated with this exact Palette instance so
                     # re-selecting works even if palette ordering changed
                     ids = set()
+                    # Add main point markers (created during assignment)
                     for kind, info in state.get('assigned', {}).items():
                         iid = info.get('iid')
                         labid = info.get('label_id')
@@ -9302,16 +9387,7 @@ class ResizableRectApp:
                                 ids.add(int(labid))
                             except Exception:
                                 pass
-                        # include any other canvas items that have the same diffuser_type tag
-                        try:
-                            for extra in canvas.find_withtag(f'diffuser_type:{kind}'):
-                                try:
-                                    ids.add(int(extra))
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                    # also include any currently selected diffuser ids in the palette
+                    # Add ONLY the currently selected diffuser ids (not all same-type diffusers)
                     try:
                         sel_pts = getattr(rc, 'selected_points', set()) or set()
                         for sp in list(sel_pts):
@@ -9323,6 +9399,54 @@ class ResizableRectApp:
                         pass
                     # store mapping with palette reference
                     try:
+                        # Before updating, remove diffusers from _supply_assigned that were
+                        # previously assigned to this HVAC but are no longer selected
+                        try:
+                            old_mapping = self.hvac_map.get(hvac_name)
+                            if old_mapping and isinstance(old_mapping, dict):
+                                old_ids = set()
+                                for oid in old_mapping.get('ids', set()) or set():
+                                    try:
+                                        old_ids.add(int(oid))
+                                    except Exception:
+                                        old_ids.add(oid)
+                                # Get main point ids (should not be removed from _supply_assigned)
+                                main_point_ids = set()
+                                try:
+                                    for kind, info in state.get('assigned', {}).items():
+                                        mp_iid = info.get('iid')
+                                        if mp_iid:
+                                            try:
+                                                main_point_ids.add(int(mp_iid))
+                                            except Exception:
+                                                main_point_ids.add(mp_iid)
+                                except Exception:
+                                    pass
+                                # Find diffusers that were in old mapping but not in new ids
+                                removed_diffusers = old_ids - ids - main_point_ids
+                                # Remove these from _supply_assigned
+                                try:
+                                    if hasattr(self, '_supply_assigned') and self._supply_assigned:
+                                        for rid in removed_diffusers:
+                                            try:
+                                                self._supply_assigned.discard(rid)
+                                            except Exception:
+                                                pass
+                                        # Also clear their outline
+                                        try:
+                                            for rid in removed_diffusers:
+                                                if rid in rc.canvas.find_all():
+                                                    try:
+                                                        rc.canvas.itemconfigure(rid, outline='')
+                                                    except Exception:
+                                                        pass
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        
                         # store mapping with palette reference
                         mapping_entry = {'palette': rc, 'ids': ids}
                         # compute per-main-point aggregated flows across the whole HVAC mapping
@@ -9418,6 +9542,58 @@ class ResizableRectApp:
                             main_point_flows = {}
                         mapping_entry['main_point_flows'] = main_point_flows
                         self.hvac_map[hvac_name] = mapping_entry
+                        # After main point assignment completes, mark all selected diffusers and main_points
+                        # with blue outline (applied/persistent state)
+                        try:
+                            # initialize persistent set if not present
+                            try:
+                                if not hasattr(self, '_supply_assigned') or self._supply_assigned is None:
+                                    self._supply_assigned = set()
+                            except Exception:
+                                self._supply_assigned = set()
+                            # get currently selected points on this palette and mark them as applied
+                            try:
+                                sel_pts = getattr(rc, 'selected_points', set()) or set()
+                                for sp in list(sel_pts):
+                                    try:
+                                        sp_int = int(sp)
+                                    except Exception:
+                                        sp_int = sp
+                                    try:
+                                        rc.canvas.itemconfigure(sp_int, outline='blue', width=2)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        self._supply_assigned.add(sp_int)
+                                    except Exception:
+                                        try:
+                                            self._supply_assigned = set(getattr(self, '_supply_assigned', set()) or set())
+                                            self._supply_assigned.add(sp_int)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                            # Also mark main_points as applied (blue outline)
+                            try:
+                                for kind, info in state.get('assigned', {}).items():
+                                    mp_iid = info.get('iid')
+                                    if mp_iid:
+                                        try:
+                                            mp_int = int(mp_iid)
+                                        except Exception:
+                                            mp_int = mp_iid
+                                        try:
+                                            rc.canvas.itemconfigure(mp_int, outline='blue', width=2)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self._supply_assigned.add(mp_int)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
                         # create small on-canvas labels next to each main point showing aggregated flow
                         try:
                             for iid, qv in list(main_point_flows.items()):
