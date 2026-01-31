@@ -2035,10 +2035,10 @@ class Palette:
         dlg.title("공간편집")
         # prefer letting the dialog size itself; enforce a reasonable minimum width/height
         try:
-            dlg.minsize(700, 520)
+            dlg.minsize(750, 600)
         except Exception:
             try:
-                dlg.geometry("700x520")
+                dlg.geometry("750x600")
             except Exception:
                 pass
         # Reserve a right-side column for the CSV table so left-side controls keep their positions
@@ -2846,6 +2846,33 @@ class Palette:
             except Exception:
                 pass
             dlg.destroy()
+            
+            # Room Design 탭이 활성화되어 있을 때만 자동 작업 수행
+            try:
+                # 현재 활성화된 팔레트가 있는지 확인
+                if self.app and hasattr(self.app, 'get_current_palette'):
+                    current_palette = self.app.get_current_palette()
+                    # 이 팔레트가 self와 같은지 확인 (Room Design 탭)
+                    if current_palette is self:
+                        # 1. 자동생성 실행
+                        try:
+                            self.app.auto_generate_current()
+                        except Exception as e:
+                            print(f"자동생성 실행 오류: {e}")
+                        
+                        # 2. 급기 풍량 산정 실행
+                        try:
+                            self.app._on_calc_supply_flow()
+                        except Exception as e:
+                            print(f"급기 풍량 산정 실행 오류: {e}")
+                        
+                        # 3. 디퓨저 자동 배치 실행
+                        try:
+                            self.app._on_place_diffusers()
+                        except Exception as e:
+                            print(f"디퓨저 자동 배치 실행 오류: {e}")
+            except Exception as e:
+                print(f"자동 작업 수행 중 오류: {e}")
 
         def on_cancel():
             dlg.destroy()
@@ -2903,9 +2930,9 @@ class Palette:
             except Exception:
                 csv_shown = None
 
-        # 버튼 프레임을 하단에 고정 배치 (항상 보이도록)
+        # 버튼을 grid 레이아웃으로 명확한 row에 배치 (항상 보이도록)
         btn_frame = tk.Frame(dlg)
-        btn_frame.pack(side='bottom', fill='x', padx=6, pady=8)
+        btn_frame.grid(row=10, column=0, columnspan=3, sticky='ew', padx=6, pady=12)
         ok_btn = tk.Button(btn_frame, text="확인", command=on_ok, width=10)
         ok_btn.pack(side='left', padx=6)
         cancel_btn = tk.Button(btn_frame, text="취소", command=on_cancel, width=10)
@@ -6701,6 +6728,17 @@ class ResizableRectApp:
 
             ent_sens = labeled_entry(frm, 0, '전체현열량 (kcal/hr):', total_sens_var)
             ent_lat = labeled_entry(frm, 1, '전체잠열량 (kcal/hr):', total_lat_var)
+            
+            # Add FocusOut handler to latent entry: if empty, set to 0
+            def on_lat_focus_out(event=None):
+                try:
+                    val = total_lat_var.get().strip()
+                    if val == '':
+                        total_lat_var.set('0')
+                except Exception:
+                    pass
+            ent_lat.bind('<FocusOut>', on_lat_focus_out)
+            
             ent_frac = labeled_entry(frm, 2, '현열비 (0~1):', sens_frac_var)
             # default: fraction entry disabled (auto-calculated)
             try:
@@ -7682,21 +7720,28 @@ class ResizableRectApp:
                             ent_frac.configure(state='readonly')
                     except Exception:
                         pass
-                # if manual and fraction is non-zero, disable totals
-                f = to_float(sens_frac_var.get())
-                if manual and f is not None and abs(f) > 1e-9:
+                # When manual mode, sensible input stays enabled, latent is calculated
+                # When auto mode, both sensible and latent inputs are enabled
+                if manual:
+                    # In manual SHR mode: enable sensible, disable latent (will be calculated)
                     try:
-                        ent_sens.configure(state='disabled')
+                        ent_sens.configure(state='normal')
                         ent_lat.configure(state='disabled')
                     except Exception:
                         pass
+                    # Trigger calculation if SHR already has a value
+                    try:
+                        on_frac_change()
+                    except Exception:
+                        pass
                 else:
+                    # In auto mode: enable both sensible and latent
                     try:
                         ent_sens.configure(state='normal')
                         ent_lat.configure(state='normal')
                     except Exception:
                         pass
-                # if fraction changed manually, update LAT
+                # Update LAT calculation
                 try:
                     recompute_lat()
                 except Exception:
@@ -7706,15 +7751,33 @@ class ResizableRectApp:
                 if not manual_frac_var.get():
                     return
                 f = to_float(sens_frac_var.get())
-                if f is not None and abs(f) > 1e-9:
+                if f is not None:
+                    # When SHR is manually entered, calculate latent load from sensible and SHR
+                    # Formula: SHR = Sensible / (Sensible + Latent)
+                    # Therefore: Latent = Sensible * (1 - SHR) / SHR (when SHR != 0)
+                    # If SHR = 1, then Latent = 0
                     try:
-                        ent_sens.configure(state='disabled')
+                        sens_val = to_float(total_sens_var.get())
+                        if sens_val is not None:
+                            if abs(f - 1.0) < 1e-9:  # SHR = 1
+                                total_lat_var.set('0')
+                            elif f > 1e-9:  # SHR > 0 and != 1
+                                lat_calc = sens_val * (1.0 - f) / f
+                                # Format with comma separator
+                                total_lat_var.set(f"{int(round(lat_calc)):,}")
+                            else:  # SHR = 0 or negative
+                                total_lat_var.set('')
+                    except Exception:
+                        pass
+                    
+                    # Disable latent input when manual SHR is active
+                    try:
                         ent_lat.configure(state='disabled')
                     except Exception:
                         pass
                 else:
+                    # No valid SHR: enable latent input
                     try:
-                        ent_sens.configure(state='normal')
                         ent_lat.configure(state='normal')
                     except Exception:
                         pass
@@ -7730,6 +7793,8 @@ class ResizableRectApp:
                 total_lat_var.trace('w', lambda *a: recompute_frac())
                 manual_frac_var.trace('w', lambda *a: on_manual_toggle())
                 sens_frac_var.trace('w', lambda *a: on_frac_change())
+                # When sensible load changes in manual SHR mode, recalculate latent
+                total_sens_var.trace('w', lambda *a: on_frac_change() if manual_frac_var.get() else None)
                 # also update LAT when temperature/RH fields change
                 try:
                     indoor_t_var.trace('w', lambda *a: recompute_lat())
@@ -7743,6 +7808,8 @@ class ResizableRectApp:
                     total_lat_var.trace_add('write', lambda *a: recompute_frac())
                     manual_frac_var.trace_add('write', lambda *a: on_manual_toggle())
                     sens_frac_var.trace_add('write', lambda *a: on_frac_change())
+                    # When sensible load changes in manual SHR mode, recalculate latent
+                    total_sens_var.trace_add('write', lambda *a: on_frac_change() if manual_frac_var.get() else None)
                     # update LAT when temperature/RH/fraction change
                     try:
                         indoor_t_var.trace_add('write', lambda *a: recompute_lat())
