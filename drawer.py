@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox, filedialog
 from math import sqrt, ceil
+import math
 import json
 import sys
 
@@ -156,24 +157,10 @@ class Palette:
         self.total_overlay_canvas = None
         self.total_overlay_rect_id = None
         self.use_total_overlay = False
-        self._force_visible_overlay = True
-        try:
-            self.enable_total_overlay(True)
-        except Exception:
-            pass
-
-        # Total-overlay Toplevel (used if user requests a system-level overlay)
-        self.total_overlay_toplevel = None
-        self.total_overlay_canvas = None
-        self.total_overlay_rect_id = None
-        self.use_total_overlay = False
-        # Force overlay visible for debugging (set True while we debug)
-        self._force_visible_overlay = True
-        # Auto-enable total overlay for immediate visual debugging of rubber-band
-        try:
-            self.enable_total_overlay(True)
-        except Exception:
-            pass
+        # Do NOT force a visible, topmost overlay by default —
+        # a topmost overlay can cover modal dialogs (hide buttons).
+        self._force_visible_overlay = False
+        # Do not auto-enable the total overlay; enable it explicitly when needed.
 
     def _to_overlay_coords(self, event):
         try:
@@ -208,7 +195,9 @@ class Palette:
             top = tk.Toplevel(root)
             top.overrideredirect(True)
             try:
-                top.wm_attributes("-topmost", True)
+                # Only make the overlay topmost when explicitly forcing visible
+                if getattr(self, '_force_visible_overlay', False):
+                    top.wm_attributes("-topmost", True)
             except Exception:
                 pass
             # Position and size to match the canvas on screen
@@ -1631,23 +1620,30 @@ class Palette:
                             except Exception:
                                 pass
                             try:
-                                # if this item is assigned to any HVAC, keep it red; else clear
-                                assigned = False
+                                # Check if item is applied (blue) - if so, restore blue; if assigned yellow, restore yellow; else clear
                                 try:
-                                    for m in getattr(self.app, 'hvac_map', {}).values():
-                                        try:
-                                            ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
-                                        except Exception:
-                                            ids_set = set(m.get('ids', set()) or set())
-                                        if iid in ids_set:
-                                            assigned = True
-                                            break
+                                    applied_diffusers = set(getattr(self.app, '_supply_assigned', set()) or set())
                                 except Exception:
-                                    assigned = False
-                                if assigned:
-                                    self.canvas.itemconfigure(iid, outline='red', width=2)
+                                    applied_diffusers = set()
+                                if iid in applied_diffusers:
+                                    self.canvas.itemconfigure(iid, outline='blue', width=2)
                                 else:
-                                    self.canvas.itemconfigure(iid, outline='')
+                                    assigned = False
+                                    try:
+                                        for m in getattr(self.app, 'hvac_map', {}).values():
+                                            try:
+                                                ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
+                                            except Exception:
+                                                ids_set = set(m.get('ids', set()) or set())
+                                            if iid in ids_set:
+                                                assigned = True
+                                                break
+                                    except Exception:
+                                        assigned = False
+                                    if assigned:
+                                        self.canvas.itemconfigure(iid, outline='yellow', width=2)
+                                    else:
+                                        self.canvas.itemconfigure(iid, outline='')
                             except Exception:
                                 pass
                         else:
@@ -1656,23 +1652,8 @@ class Palette:
                             except Exception:
                                 pass
                             try:
-                                # when user selects via drag, show selected-but-unassigned as blue
-                                assigned = False
-                                try:
-                                    for m in getattr(self.app, 'hvac_map', {}).values():
-                                        try:
-                                            ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
-                                        except Exception:
-                                            ids_set = set(m.get('ids', set()) or set())
-                                        if iid in ids_set:
-                                            assigned = True
-                                            break
-                                except Exception:
-                                    assigned = False
-                                if assigned:
-                                    self.canvas.itemconfigure(iid, outline='red', width=2)
-                                else:
-                                    self.canvas.itemconfigure(iid, outline='blue')
+                                # when user selects via drag, show all selected items as red (temporary selection)
+                                self.canvas.itemconfigure(iid, outline='red', width=2)
                             except Exception:
                                 pass
                     else:
@@ -1680,24 +1661,9 @@ class Palette:
                             current_selected.add(iid)
                         except Exception:
                             pass
-                        # visually mark selection: blue if unassigned, red if assigned
+                        # visually mark all drag-selected items as red (temporary selection state)
                         try:
-                            assigned = False
-                            try:
-                                for m in getattr(self.app, 'hvac_map', {}).values():
-                                    try:
-                                        ids_set = set(int(x) if isinstance(x, (int, str)) and str(x).isdigit() else x for x in (m.get('ids', set()) or set()))
-                                    except Exception:
-                                        ids_set = set(m.get('ids', set()) or set())
-                                    if iid in ids_set:
-                                        assigned = True
-                                        break
-                            except Exception:
-                                assigned = False
-                            if assigned:
-                                self.canvas.itemconfigure(iid, outline='red', width=2)
-                            else:
-                                self.canvas.itemconfigure(iid, outline='blue')
+                            self.canvas.itemconfigure(iid, outline='red', width=2)
                         except Exception:
                             pass
             # finalize selection set
@@ -1731,12 +1697,22 @@ class Palette:
             except Exception:
                 assigned_all = set()
 
+            try:
+                applied_diffusers = set(getattr(self.app, '_supply_assigned', set()) or set())
+            except Exception:
+                applied_diffusers = set()
+
             for iid in list(self.selected_points):
                 try:
-                    # if this item is assigned to any HVAC, leave it red; otherwise clear outline
-                    if iid in assigned_all:
+                    # if this item is applied, keep blue outline; if assigned to HVAC, restore yellow; otherwise clear
+                    if iid in applied_diffusers:
                         try:
-                            self.canvas.itemconfigure(iid, outline='red', width=2)
+                            self.canvas.itemconfigure(iid, outline='blue', width=2)
+                        except Exception:
+                            pass
+                    elif iid in assigned_all:
+                        try:
+                            self.canvas.itemconfigure(iid, outline='yellow', width=2)
                         except Exception:
                             pass
                     else:
@@ -2037,14 +2013,34 @@ class Palette:
         base_name = m.group(1).strip() if m else old
 
         # popup dialog with entry + combobox
-        dlg = tk.Toplevel(self.canvas.master)
-        dlg.transient(self.canvas.master)
-        dlg.title("공간편집")
-        # make popup wider so controls don't overlap
         try:
-            dlg.geometry("700x420")
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
         except Exception:
             pass
+        dlg = tk.Toplevel(self.canvas.master)
+        try:
+            dlg.lift()
+            try:
+                dlg.wm_attributes('-topmost', True)
+                dlg.after(60, lambda: dlg.wm_attributes('-topmost', False))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        dlg.transient(self.canvas.master)
+        dlg.title("공간편집")
+        # prefer letting the dialog size itself; enforce a reasonable minimum width/height
+        try:
+            dlg.minsize(750, 600)
+        except Exception:
+            try:
+                dlg.geometry("750x600")
+            except Exception:
+                pass
         # Reserve a right-side column for the CSV table so left-side controls keep their positions
         try:
             dlg.grid_columnconfigure(0, weight=0)
@@ -2850,6 +2846,33 @@ class Palette:
             except Exception:
                 pass
             dlg.destroy()
+            
+            # Room Design 탭이 활성화되어 있을 때만 자동 작업 수행
+            try:
+                # 현재 활성화된 팔레트가 있는지 확인
+                if self.app and hasattr(self.app, 'get_current_palette'):
+                    current_palette = self.app.get_current_palette()
+                    # 이 팔레트가 self와 같은지 확인 (Room Design 탭)
+                    if current_palette is self:
+                        # 1. 자동생성 실행
+                        try:
+                            self.app.auto_generate_current()
+                        except Exception as e:
+                            print(f"자동생성 실행 오류: {e}")
+                        
+                        # 2. 급기 풍량 산정 실행
+                        try:
+                            self.app._on_calc_supply_flow()
+                        except Exception as e:
+                            print(f"급기 풍량 산정 실행 오류: {e}")
+                        
+                        # 3. 디퓨저 자동 배치 실행
+                        try:
+                            self.app._on_place_diffusers()
+                        except Exception as e:
+                            print(f"디퓨저 자동 배치 실행 오류: {e}")
+            except Exception as e:
+                print(f"자동 작업 수행 중 오류: {e}")
 
         def on_cancel():
             dlg.destroy()
@@ -2907,10 +2930,13 @@ class Palette:
             except Exception:
                 csv_shown = None
 
-        ok_btn = tk.Button(dlg, text="확인", command=on_ok)
-        ok_btn.grid(row=6, column=0, padx=6, pady=8)
-        cancel_btn = tk.Button(dlg, text="취소", command=on_cancel)
-        cancel_btn.grid(row=6, column=1, padx=6, pady=8)
+        # 버튼을 grid 레이아웃으로 명확한 row에 배치 (항상 보이도록)
+        btn_frame = tk.Frame(dlg)
+        btn_frame.grid(row=10, column=0, columnspan=3, sticky='ew', padx=6, pady=12)
+        ok_btn = tk.Button(btn_frame, text="확인", command=on_ok, width=10)
+        ok_btn.pack(side='left', padx=6)
+        cancel_btn = tk.Button(btn_frame, text="취소", command=on_cancel, width=10)
+        cancel_btn.pack(side='left', padx=6)
         name_entry.focus_set()
 
     def on_space_heat_norm_click(self, event):
@@ -4441,6 +4467,14 @@ class ResizableRectApp:
 
         load_btn = tk.Button(top_frame, text="불러오기", command=self.load_current)
         load_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Cloud storage buttons
+        cloud_upload_btn = tk.Button(top_frame, text="클라우드 업로드", command=self.cloud_upload_current)
+        cloud_upload_btn.pack(side=tk.LEFT, padx=5)
+        
+        cloud_browser_btn = tk.Button(top_frame, text="클라우드 브라우저", command=self.cloud_browser)
+        cloud_browser_btn.pack(side=tk.LEFT, padx=5)
+        
         # CSV preview/load button: opens a CSV and shows it in a new window as a table
         csv_btn = tk.Button(top_frame, text="CSV로드 (C)", command=self.load_csv_preview)
         csv_btn.pack(side=tk.LEFT, padx=5)
@@ -4613,7 +4647,19 @@ class ResizableRectApp:
         if not rc:
             self.sizing_text.insert(tk.END, "오류: 활성 팔레트가 없습니다.\n")
             return
-        # reuse existing equal distribution if available: call palette helper
+
+        # Show AHU capacity dialog before performing equal distribution
+        try:
+            ok = self._show_ahu_capacity_dialog()
+        except Exception:
+            ok = False
+
+        if not ok:
+            # user cancelled or dialog failed
+            self.sizing_text.insert(tk.END, "균등 배분 취소됨.\n")
+            return
+
+        # reuse existing equal distribution: call palette helper
         try:
             rc.compute_and_apply_supply_flow()
             self.sizing_text.insert(tk.END, "균등 배분 수행 완료.\n")
@@ -4661,6 +4707,71 @@ class ResizableRectApp:
                     continue
         except Exception:
             pass
+
+            # Additional normalization: ensure ids in each mapping are present and
+            # actually belong to that HVAC (either located on the mapping's palette
+            # or explicitly tagged with hvac:<name>). Clean up inconsistent hvac tags
+            # from items that were moved/removed to avoid ghost associations.
+            try:
+                for name in list(self.hvac_map.keys()):
+                    try:
+                        mapping = self.hvac_map.get(name)
+                        if not mapping or not isinstance(mapping, dict):
+                            continue
+                        pal = mapping.get('palette')
+                        orig_ids = set(mapping.get('ids', set()) or set())
+                        keep_ids = set()
+                        for iid in orig_ids:
+                            try:
+                                iid_int = int(iid)
+                            except Exception:
+                                iid_int = iid
+                            # locate item on any palette
+                            found_pal = None
+                            for p in getattr(self, 'palettes', []):
+                                try:
+                                    if iid_int in p.canvas.find_all():
+                                        found_pal = p
+                                        break
+                                except Exception:
+                                    continue
+                            # if not found on any palette, skip
+                            if not found_pal:
+                                # also remove any hvac tag lingering elsewhere
+                                try:
+                                    for p in getattr(self, 'palettes', []):
+                                        try:
+                                            if iid_int in p.canvas.find_all():
+                                                try:
+                                                    p.canvas.dtag(iid_int, f'hvac:{name}')
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    pass
+                                continue
+                            try:
+                                tags = found_pal.canvas.gettags(iid_int)
+                            except Exception:
+                                tags = ()
+                            # Accept if explicitly tagged for this hvac, or if it lives on the mapping palette
+                            if f'hvac:{name}' in tags or (pal is not None and found_pal is pal):
+                                keep_ids.add(iid_int)
+                            else:
+                                # item belongs elsewhere and is not tagged for this hvac; remove any hvac tag for this name
+                                try:
+                                    found_pal.canvas.dtag(iid_int, f'hvac:{name}')
+                                except Exception:
+                                    pass
+                                # do not keep
+                                continue
+                        mapping['ids'] = keep_ids
+                        self.hvac_map[name] = mapping
+                    except Exception:
+                        continue
+            except Exception:
+                pass
 
         # run router for every HVAC system recorded
         try:
@@ -6102,32 +6213,274 @@ class ResizableRectApp:
     def _compute_thickness_breakdown(self):
         # Read the low/high pressure rule entries and display a simple summary
         try:
-            lines = []
-            lines.append("두께별 소요량 계산 시작:\n")
+            # Build a table of duct segments: HVAC | Line Type | Size WxH | Length (m) | Area (m2)
+            rows = []
             try:
-                low_pairs = getattr(self, '_thk_low_pairs', [])
-                lines.append("[저압 규칙]")
-                for tpl in low_pairs:
-                    l_thk, l_min, e_max = tpl
-                    min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else ''
-                    max_txt = e_max.get() if e_max else ''
-                    lines.append(f"{l_thk.cget('text')} : {min_txt} -> {max_txt}")
+                for pal in getattr(self, 'palettes', []):
+                    try:
+                        canvas = pal.canvas
+                        # collect duct items on this palette
+                        duct_items = list(canvas.find_withtag('duct'))
+                        # separate lines and texts for matching
+                        line_items = [iid for iid in duct_items if canvas.type(iid) == 'line']
+                        text_items = [iid for iid in duct_items if canvas.type(iid) == 'text']
+
+                        # helper: parse size from a text string like '1,000 x 500 mm' or '1,000 x 500 mm\n123 m3/h'
+                        import re
+                        def parse_size(txt):
+                            try:
+                                # take first line and normalize common variants
+                                first = str(txt).split('\n', 1)[0]
+                                # normalize multiplication sign variants and remove NBSPs
+                                first = first.replace('\u00D7', 'x').replace('×', 'x').replace('\u00A0', ' ')
+                                # allow comma thousand separators and optional decimals
+                                m = re.search(r"([\d,]+(?:\.[\d]+)?)\s*[xX]\s*([\d,]+(?:\.[\d]+)?)\s*mm", first)
+                                if m:
+                                    g1 = m.group(1).replace(',', '')
+                                    g2 = m.group(2).replace(',', '')
+                                    try:
+                                        w = float(g1)
+                                        h = float(g2)
+                                    except Exception:
+                                        return None, None, None
+                                    # present as integer mm where possible
+                                    try:
+                                        w_int = int(round(w))
+                                        h_int = int(round(h))
+                                        size_out = f"{w_int:,} x {h_int:,} mm"
+                                    except Exception:
+                                        size_out = f"{w} x {h} mm"
+                                    return size_out, float(w) / 1000.0, float(h) / 1000.0
+                            except Exception:
+                                pass
+                            return None, None, None
+
+                        # precompute text coords and parsed sizes
+                        text_info = {}
+                        for tid in text_items:
+                            try:
+                                ttext = canvas.itemcget(tid, 'text')
+                                tags = canvas.gettags(tid)
+                                coords = canvas.coords(tid)
+                                size_str, w_m, h_m = parse_size(ttext)
+                                text_info[tid] = {'text': ttext, 'tags': tags, 'coords': coords, 'size_str': size_str, 'w_m': w_m, 'h_m': h_m}
+                            except Exception:
+                                continue
+
+                        # for each line, find matching text (same hvac tag) nearest to midpoint
+                        for lid in line_items:
+                            try:
+                                coords = canvas.coords(lid)
+                                if not coords or len(coords) < 4:
+                                    continue
+                                x1, y1, x2, y2 = coords[0], coords[1], coords[-2], coords[-1]
+                                mx = (x1 + x2) / 2.0
+                                my = (y1 + y2) / 2.0
+                                # length in pixels -> meters
+                                import math
+                                length_px = math.hypot(x2 - x1, y2 - y1)
+                                try:
+                                    length_m = pal.pixel_to_meter(length_px)
+                                except Exception:
+                                    length_m = length_px / getattr(pal, 'scale', 1.0)
+                                tags = canvas.gettags(lid)
+                                hv_tags = [t for t in tags if isinstance(t, str) and t.startswith('hvac:')]
+                                hv_name = hv_tags[0].split(':', 1)[1] if hv_tags else '<unknown>'
+                                # determine line type by fill color
+                                try:
+                                    fill = canvas.itemcget(lid, 'fill')
+                                except Exception:
+                                    fill = ''
+                                if fill in ('darkgreen', 'green'):
+                                    line_type = 'Supply'
+                                elif fill in ('skyblue', 'lightblue'):
+                                    line_type = 'Return'
+                                else:
+                                    line_type = 'Duct'
+
+                                # Prefer texts tagged for the same HVAC, but fall back to any nearby text
+                                candidates = []
+                                if hv_name == '<unknown>':
+                                    candidates = list(text_info.items())
+                                else:
+                                    candidates = [(tid, info) for tid, info in text_info.items() if f'hvac:{hv_name}' in (info.get('tags') or ())]
+                                    if not candidates:
+                                        # fallback to all texts when no hvac-tagged texts exist
+                                        candidates = list(text_info.items())
+
+                                best = None
+                                best_d = None
+                                for tid, info in candidates:
+                                    try:
+                                        tcoords = info.get('coords') or []
+                                        if not tcoords or len(tcoords) < 2:
+                                            continue
+                                        # compute text center
+                                        if len(tcoords) >= 4:
+                                            tx = (tcoords[0] + tcoords[2]) / 2.0
+                                            ty = (tcoords[1] + tcoords[3]) / 2.0
+                                        else:
+                                            tx = tcoords[0]
+                                            ty = tcoords[1]
+
+                                        # compute perpendicular distance from (tx,ty) to line segment (x1,y1)-(x2,y2)
+                                        vx = x2 - x1
+                                        vy = y2 - y1
+                                        wx = tx - x1
+                                        wy = ty - y1
+                                        seg_len2 = vx*vx + vy*vy
+                                        if seg_len2 == 0:
+                                            proj = 0.0
+                                        else:
+                                            proj = (wx*vx + wy*vy) / seg_len2
+                                        if proj < 0.0:
+                                            closest_x, closest_y = x1, y1
+                                        elif proj > 1.0:
+                                            closest_x, closest_y = x2, y2
+                                        else:
+                                            closest_x = x1 + proj * vx
+                                            closest_y = y1 + proj * vy
+                                        dx = tx - closest_x
+                                        dy = ty - closest_y
+                                        dist = (dx*dx + dy*dy) ** 0.5
+                                        if best_d is None or dist < best_d:
+                                            best_d = dist
+                                            best = info
+                                    except Exception:
+                                        continue
+
+                                size_str = ''
+                                w_m = None
+                                h_m = None
+                                # threshold: within 0.2m or 20px whichever is larger
+                                try:
+                                    thresh_px = max(20.0, pal.meter_to_pixel(0.2))
+                                except Exception:
+                                    thresh_px = 20.0
+                                if best and best_d is not None and best_d <= thresh_px:
+                                    size_str = best.get('size_str') or ''
+                                    w_m = best.get('w_m')
+                                    h_m = best.get('h_m')
+
+                                # compute area (m2) as perimeter * length: (W + H) * 2 * length
+                                area_m2 = None
+                                if w_m and h_m and length_m is not None:
+                                    try:
+                                        area_m2 = (w_m + h_m) * 2.0 * float(length_m)
+                                    except Exception:
+                                        area_m2 = None
+
+                                # store palette and line id along with display values for precise mapping
+                                rows.append((hv_name, line_type, size_str or 'N/A', round(length_m, 3), round(area_m2 or 0.0, 3), pal, lid))
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
             except Exception:
-                pass
+                rows = []
+
+            # create popup window with Treeview
             try:
-                high_pairs = getattr(self, '_thk_high_pairs', [])
-                lines.append('\n[고압 규칙]')
-                for tpl in high_pairs:
-                    l_thk, l_min, e_max = tpl
-                    min_txt = l_min.cget('text') if hasattr(l_min, 'cget') else ''
-                    max_txt = e_max.get() if e_max else ''
-                    lines.append(f"{l_thk.cget('text')} : {min_txt} -> {max_txt}")
-            except Exception:
-                pass
-            try:
-                self.sizing_text.insert(tk.END, "\n".join(lines) + "\n")
-            except Exception:
-                print("두께 규칙:\n" + "\n".join(lines))
+                # ensure any transient overlay is removed so the dialog is visible
+                try:
+                    self._destroy_total_overlay()
+                except Exception:
+                    pass
+                win = tk.Toplevel(self.root)
+                try:
+                    win.lift()
+                    try:
+                        win.wm_attributes('-topmost', True)
+                        win.after(60, lambda: win.wm_attributes('-topmost', False))
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                win.title('덕트 물량 상세')
+                win.geometry('800x400')
+                cols = ('HVAC', 'Line', 'Size', 'Length(m)', 'Area(m2)')
+                tv = ttk.Treeview(win, columns=cols, show='headings')
+                for c in cols:
+                    tv.heading(c, text=c)
+                    tv.column(c, width=120 if c != 'Size' else 160, anchor=tk.W)
+                tv.pack(fill=tk.BOTH, expand=True)
+                # insert rows and remember mapping from tree item -> (palette, line id)
+                row_map = {}
+                for r in rows:
+                    try:
+                        # rows entries were appended as (hv_name, line_type, size_str, length_m, area_m2, pal, lid)
+                        hv, ltype, size_s, length_v, area_v, pal_obj, lid_obj = r
+                        display_vals = (hv, ltype, size_s, length_v, area_v)
+                        iid = tv.insert('', tk.END, values=display_vals)
+                        row_map[iid] = (pal_obj, lid_obj)
+                    except Exception:
+                        continue
+                # add simple close button
+                # highlight state
+                current_highlight = {'pal': None, 'item': None, 'orig_opts': None}
+
+                def clear_highlight():
+                    hp = current_highlight.get('pal')
+                    hi = current_highlight.get('item')
+                    orig = current_highlight.get('orig_opts')
+                    if hp and hi and orig:
+                        try:
+                            # restore original options
+                            try:
+                                hp.canvas.itemconfigure(hi, fill=orig.get('fill', ''), width=orig.get('width', 1))
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    current_highlight['pal'] = None
+                    current_highlight['item'] = None
+                    current_highlight['orig_opts'] = None
+
+                def on_select(event):
+                    try:
+                        sel = tv.selection()
+                        if not sel:
+                            clear_highlight()
+                            return
+                        iid = sel[0]
+                        pair = row_map.get(iid)
+                        if not pair:
+                            clear_highlight()
+                            return
+                        pal, lid = pair
+                        if pal is None or lid is None:
+                            clear_highlight()
+                            return
+                        # clear previous
+                        clear_highlight()
+                        try:
+                            orig_fill = pal.canvas.itemcget(lid, 'fill')
+                        except Exception:
+                            orig_fill = ''
+                        try:
+                            orig_width = pal.canvas.itemcget(lid, 'width')
+                        except Exception:
+                            orig_width = 1
+                        current_highlight['pal'] = pal
+                        current_highlight['item'] = lid
+                        current_highlight['orig_opts'] = {'fill': orig_fill, 'width': orig_width}
+                        try:
+                            pal.canvas.itemconfigure(lid, fill='orange', width=max(3, int(float(orig_width) * 2)))
+                            # bring to front
+                            pal.canvas.tag_raise(lid)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                tv.bind('<<TreeviewSelect>>', on_select)
+                btn = tk.Button(win, text='닫기', command=lambda: (clear_highlight(), win.destroy()))
+                btn.pack(pady=6)
+            except Exception as e:
+                try:
+                    self.sizing_text.insert(tk.END, f"두께별 창 생성 오류: {e}\n")
+                except Exception:
+                    print("두께별 창 생성 오류:", e)
         except Exception as e:
             try:
                 self.sizing_text.insert(tk.END, f"두께 계산 오류: {e}\n")
@@ -6208,18 +6561,39 @@ class ResizableRectApp:
                                             pal.canvas.delete(iid_int)
                                         except Exception:
                                             pass
+                                    # delete items tagged with this hvac key (includes this system's flow labels)
+                                    try:
+                                        hv_tag = f'hvac:{key}'
+                                        for it in list(pal.canvas.find_withtag(hv_tag)):
+                                            try:
+                                                pal.canvas.delete(it)
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
                             except Exception:
                                 # ignore errors when querying/deleting this item
                                 pass
-                        # clear highlighted outlines on this palette
+                        # clear highlighted outlines on this palette, but keep supply-assigned persistent
                         try:
+                            try:
+                                supply_assigned = set(getattr(self, '_supply_assigned', set()) or set())
+                            except Exception:
+                                supply_assigned = set()
                             for hid in list(getattr(self, '_hvac_highlighted', set())):
                                 try:
-                                    if hid in pal.canvas.find_all():
+                                    if hid in pal.canvas.find_all() and hid not in supply_assigned:
                                         pal.canvas.itemconfigure(hid, outline='')
                                 except Exception:
                                     pass
-                            self._hvac_highlighted.clear()
+                            # keep any supply-assigned ids in _hvac_highlighted
+                            try:
+                                self._hvac_highlighted = set(x for x in getattr(self, '_hvac_highlighted', set()) if x in supply_assigned)
+                            except Exception:
+                                try:
+                                    self._hvac_highlighted.clear()
+                                except Exception:
+                                    self._hvac_highlighted = set()
                         except Exception:
                             pass
                 except Exception:
@@ -6236,6 +6610,2030 @@ class ResizableRectApp:
                 pass
         except Exception:
             pass
+
+    def _show_ahu_capacity_dialog(self):
+        """Modal dialog to input AHU capacity parameters used before equal distribution.
+
+        Fields:
+        - 전체현열량 (kcal/hr)
+        - 전체잠열량 (kcal/hr)
+        - 현열비 (sensible fraction) (자동계산, 기본 비활성)
+        - 실내온도 (℃)
+        - 실내상대습도 (%RH)
+        - 코일통과 후 지정상대습도 (%RH)
+
+        Behavior:
+        - If totals entered, 현열비 auto-calculated = sens/(sens+lat) and shown (disabled).
+        - User may check '현열비 수동입력' to enable manual editing of 현열비.
+          If manual 현열비 != 0, disable total sensible/latent inputs.
+        Returns True if user confirmed (OK), False if cancelled.
+        Stores values in self.ahu_capacity dict on OK.
+        """
+        try:
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
+            dlg = tk.Toplevel(self.root)
+            try:
+                dlg.lift()
+                try:
+                    dlg.wm_attributes('-topmost', True)
+                    dlg.after(60, lambda: dlg.wm_attributes('-topmost', False))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            dlg.transient(self.root)
+            dlg.title('공조기계산')
+            dlg.geometry('1400x800')  # 창 크기를 더 크게 설정
+            dlg.grab_set()
+            # 외기조건 프레임박스 (최상단)
+            topframe = tk.LabelFrame(dlg, text='외기조건')
+            topframe.pack(fill=tk.X, padx=10, pady=(10,0))
+            # winter/summer outdoor inputs with defaults
+            win_db_var = tk.StringVar(value='-12')
+            win_rh_var = tk.StringVar(value='90')
+            sum_db_var = tk.StringVar(value='32')
+            sum_rh_var = tk.StringVar(value='60')
+            # touched flags: if defaults present, mark touched so values compute on open
+            win_touched = bool(str(win_db_var.get()).strip() or str(win_rh_var.get()).strip())
+            sum_touched = bool(str(sum_db_var.get()).strip() or str(sum_rh_var.get()).strip())
+            # output vars for enthalpy (kcal/kg) and absolute humidity (g/kg)
+            win_h_var = tk.StringVar()
+            win_abs_var = tk.StringVar()
+            sum_h_var = tk.StringVar()
+            sum_abs_var = tk.StringVar()
+            tk.Label(topframe, text='겨울철 건구온도 (℃):').grid(row=0, column=0, sticky='w', padx=4, pady=2)
+            win_db_entry = tk.Entry(topframe, textvariable=win_db_var, width=10)
+            win_db_entry.grid(row=0, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='겨울철 상대습도 (%RH):').grid(row=0, column=2, sticky='w', padx=4, pady=2)
+            win_rh_entry = tk.Entry(topframe, textvariable=win_rh_var, width=10)
+            win_rh_entry.grid(row=0, column=3, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='엔탈피 (kcal/kg):').grid(row=0, column=4, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=win_h_var, width=12, state='readonly').grid(row=0, column=5, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='절대습도 (g/kg):').grid(row=0, column=6, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=win_abs_var, width=12, state='readonly').grid(row=0, column=7, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='여름철 건구온도 (℃):').grid(row=1, column=0, sticky='w', padx=4, pady=2)
+            sum_db_entry = tk.Entry(topframe, textvariable=sum_db_var, width=10)
+            sum_db_entry.grid(row=1, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='여름철 상대습도 (%RH):').grid(row=1, column=2, sticky='w', padx=4, pady=2)
+            sum_rh_entry = tk.Entry(topframe, textvariable=sum_rh_var, width=10)
+            sum_rh_entry.grid(row=1, column=3, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='엔탈피 (kcal/kg):').grid(row=1, column=4, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=sum_h_var, width=12, state='readonly').grid(row=1, column=5, sticky='w', padx=4, pady=2)
+            tk.Label(topframe, text='절대습도 (g/kg):').grid(row=1, column=6, sticky='w', padx=4, pady=2)
+            tk.Entry(topframe, textvariable=sum_abs_var, width=12, state='readonly').grid(row=1, column=7, sticky='w', padx=4, pady=2)
+            
+            # 버튼 프레임을 먼저 하단에 고정 배치 (항상 보이도록)
+            btnf = tk.Frame(dlg)
+            btnf.pack(side='bottom', fill='x', padx=10, pady=8)
+            
+            # layout
+            # content frame holds the main form on the left and the chart area on the right
+            content = tk.Frame(dlg)
+            # fill remaining space but leave room for bottom button frame
+            content.pack(padx=10, pady=(10,0), fill=tk.BOTH, expand=True)
+
+            frm = tk.Frame(content)
+            frm.pack(side='left', fill=tk.BOTH, expand=False)
+
+            # chart container on the right (initially empty - will draw a psychrometric chart)
+            chart_frame = tk.Frame(content, width=700, height=650)
+            chart_frame.pack_propagate(False)
+            chart_frame.pack(side='right', padx=(10,0), fill='both', expand=True)
+
+            def labeled_entry(parent, row, label_text, var, width=18):
+                tk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=4, pady=4)
+                ent = tk.Entry(parent, textvariable=var, width=width)
+                ent.grid(row=row, column=1, sticky='w', padx=4, pady=4)
+                return ent
+
+            # default sens/lat values
+            total_sens_var = tk.StringVar(value='120,000')
+            total_lat_var = tk.StringVar(value='12,000')
+            sens_frac_var = tk.StringVar()
+            indoor_t_var = tk.StringVar(value='23.0')
+            indoor_rh_var = tk.StringVar(value='50')
+            # 동절기(겨울) 입력값 — 초기값은 하절기와 동일
+            indoor_w_t_var = tk.StringVar(value=indoor_t_var.get())
+            indoor_w_rh_var = tk.StringVar(value=indoor_rh_var.get())
+            coil_rh_var = tk.StringVar(value='95')
+            # LAT display variable
+            lat_var = tk.StringVar()
+            # Delta T display variable (indoor temp - LAT)
+            delta_var = tk.StringVar()
+            manual_frac_var = tk.IntVar(value=0)
+
+            ent_sens = labeled_entry(frm, 0, '전체현열량 (kcal/hr):', total_sens_var)
+            ent_lat = labeled_entry(frm, 1, '전체잠열량 (kcal/hr):', total_lat_var)
+            
+            # Add FocusOut handler to latent entry: if empty, set to 0
+            def on_lat_focus_out(event=None):
+                try:
+                    val = total_lat_var.get().strip()
+                    if val == '':
+                        total_lat_var.set('0')
+                except Exception:
+                    pass
+            ent_lat.bind('<FocusOut>', on_lat_focus_out)
+            
+            ent_frac = labeled_entry(frm, 2, '현열비 (0~1):', sens_frac_var)
+            # default: fraction entry disabled (auto-calculated)
+            try:
+                ent_frac.configure(state='disabled')
+            except Exception:
+                ent_frac.configure(state='readonly')
+
+            chk = tk.Checkbutton(frm, text='수동입력', variable=manual_frac_var)
+            # Do not change grid positions of the label and entry for 현열비.
+            # Instead place the checkbox visually between them after layout using absolute placement.
+            def place_manual_chk():
+                try:
+                    # find the label and entry widgets placed by labeled_entry at row=2
+                    lbls = frm.grid_slaves(row=2, column=0)
+                    ents = frm.grid_slaves(row=2, column=1)
+                    if not lbls or not ents:
+                        # try again shortly if geometry not ready
+                        frm.after(50, place_manual_chk)
+                        return
+                    lbl = lbls[0]
+                    ent_widget = ents[0]
+                    # compute x as right edge of label + small gap
+                    x = lbl.winfo_x() + lbl.winfo_width() + 6
+                    # align vertically with the entry widget
+                    y = ent_widget.winfo_y()
+                    chk.place(x=x, y=y)
+                except Exception:
+                    try:
+                        frm.after(50, place_manual_chk)
+                    except Exception:
+                        pass
+
+            # schedule placement after geometry is calculated
+            frm.after(50, place_manual_chk)
+
+            # 실내난방부하 (kcal/hr) - insert after 현열비 and before 실내온도
+            indoor_heat_load_var = tk.StringVar(value='50000')
+            ent_indoor_heat = labeled_entry(frm, 3, '실내난방부하 (kcal/hr):', indoor_heat_load_var)
+            # live-format for indoor heat load
+            def live_format_heat(event=None):
+                try:
+                    s = indoor_heat_load_var.get()
+                    if not s:
+                        return
+                    st = str(s).replace(',', '').replace('\u00A0', '').strip()
+                    if st == '':
+                        return
+                    v = float(st)
+                    indoor_heat_load_var.set(f"{int(round(v)):,.0f}")
+                except Exception:
+                    return
+
+            ent_indoor_heat.bind('<KeyRelease>', live_format_heat)
+
+            # create an Indoor Conditions frame right above the main form
+            # 체크된 상태가 기본 (동절기조건 동일)
+            indoor_same_winter_var = tk.IntVar(value=1)
+            indoor_frame = tk.LabelFrame(dlg, text='실내조건')
+            # entries inside indoor_frame
+            tk.Label(indoor_frame, text='(하절기)건구온도 (℃):').grid(row=0, column=0, sticky='w', padx=4, pady=2)
+            ent_indoor_t_entry = tk.Entry(indoor_frame, textvariable=indoor_t_var, width=10)
+            ent_indoor_t_entry.grid(row=0, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(indoor_frame, text='(하절기)상대습도 (%RH):').grid(row=0, column=2, sticky='w', padx=4, pady=2)
+            ent_indoor_rh_entry = tk.Entry(indoor_frame, textvariable=indoor_rh_var, width=10)
+            ent_indoor_rh_entry.grid(row=0, column=3, sticky='w', padx=4, pady=2)
+            # absolute humidity next to RH (read-only, g/kg)
+            indoor_abs_var = tk.StringVar()
+            tk.Label(indoor_frame, text='(하절기)절대습도 (g/kg):').grid(row=0, column=4, sticky='w', padx=4, pady=2)
+            ent_indoor_abs = tk.Entry(indoor_frame, textvariable=indoor_abs_var, width=10, state='readonly')
+            ent_indoor_abs.grid(row=0, column=5, sticky='w', padx=4, pady=2)
+            # checkbox placed to the far right
+            try:
+                chk_same = tk.Checkbutton(indoor_frame, variable=indoor_same_winter_var, text='동절기 조건 동일')
+                chk_same.grid(row=0, column=6, sticky='w', padx=4, pady=2)
+            except Exception:
+                pass
+
+            # 동절기 입력창 (초기값은 하절기 값과 동일)
+            tk.Label(indoor_frame, text='(동절기)건구온도 (℃):').grid(row=1, column=0, sticky='w', padx=4, pady=2)
+            ent_indoor_w_t_entry = tk.Entry(indoor_frame, textvariable=indoor_w_t_var, width=10)
+            ent_indoor_w_t_entry.grid(row=1, column=1, sticky='w', padx=4, pady=2)
+            tk.Label(indoor_frame, text='(동절기)상대습도 (%RH):').grid(row=1, column=2, sticky='w', padx=4, pady=2)
+            ent_indoor_w_rh_entry = tk.Entry(indoor_frame, textvariable=indoor_w_rh_var, width=10)
+            ent_indoor_w_rh_entry.grid(row=1, column=3, sticky='w', padx=4, pady=2)
+            # absolute humidity for winter
+            indoor_w_abs_var = tk.StringVar()
+            tk.Label(indoor_frame, text='(동절기)절대습도 (g/kg):').grid(row=1, column=4, sticky='w', padx=4, pady=2)
+            ent_indoor_w_abs = tk.Entry(indoor_frame, textvariable=indoor_w_abs_var, width=10, state='readonly')
+            ent_indoor_w_abs.grid(row=1, column=5, sticky='w', padx=4, pady=2)
+
+            # handlers: toggle enable/disable and sync values from 하절기 -> 동절기 when checked
+            def on_same_toggle(*_a):
+                same = bool(indoor_same_winter_var.get())
+                st = 'disabled' if same else 'normal'
+                try:
+                    ent_indoor_w_t_entry.configure(state=st)
+                    ent_indoor_w_rh_entry.configure(state=st)
+                except Exception:
+                    pass
+                if same:
+                    # copy current 하절기 values into 동절기
+                    indoor_w_t_var.set(indoor_t_var.get())
+                    indoor_w_rh_var.set(indoor_rh_var.get())
+                # when toggling, update mixed/coil calculations to reflect new state
+                try:
+                    update_mixed_props()
+                except Exception:
+                    try:
+                        recompute_lat()
+                    except Exception:
+                        pass
+
+            def sync_summer_to_winter(*_a):
+                if indoor_same_winter_var.get():
+                    indoor_w_t_var.set(indoor_t_var.get())
+                    indoor_w_rh_var.set(indoor_rh_var.get())
+
+            # attach traces
+            try:
+                indoor_same_winter_var.trace('w', lambda *a: on_same_toggle())
+                indoor_t_var.trace('w', lambda *a: sync_summer_to_winter())
+                indoor_rh_var.trace('w', lambda *a: sync_summer_to_winter())
+                # update absolute humidity displays when indoor temp or RH change
+                def update_indoor_abs(*_a):
+                    try:
+                        t = to_float(indoor_t_var.get())
+                        rh = to_float(indoor_rh_var.get())
+                        if t is None or rh is None:
+                            indoor_abs_var.set('')
+                        else:
+                            w = humidity_ratio(float(t), float(rh) / 100.0)
+                            if w is None:
+                                indoor_abs_var.set('')
+                            else:
+                                # convert kg/kg -> g/kg
+                                indoor_abs_var.set(f"{w*1000.0:.2f}")
+                    except Exception:
+                        indoor_abs_var.set('')
+                    # redraw chart
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+
+                def update_indoor_w_abs(*_a):
+                    try:
+                        t = to_float(indoor_w_t_var.get())
+                        rh = to_float(indoor_w_rh_var.get())
+                        if t is None or rh is None:
+                            indoor_w_abs_var.set('')
+                        else:
+                            w = humidity_ratio(float(t), float(rh) / 100.0)
+                            if w is None:
+                                indoor_w_abs_var.set('')
+                            else:
+                                indoor_w_abs_var.set(f"{w*1000.0:.2f}")
+                    except Exception:
+                        indoor_w_abs_var.set('')
+                    # redraw chart
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+                    except Exception:
+                        indoor_w_abs_var.set('')
+
+                indoor_t_var.trace_add('write', lambda *a: (sync_summer_to_winter(), update_indoor_abs()))
+                indoor_rh_var.trace_add('write', lambda *a: (sync_summer_to_winter(), update_indoor_abs()))
+                indoor_w_t_var.trace_add('write', lambda *a: update_indoor_w_abs())
+                indoor_w_rh_var.trace_add('write', lambda *a: update_indoor_w_abs())
+                
+                # Note: initial absolute humidity values computed in _initial_recompute (after humidity_ratio defined)
+            except Exception:
+                pass
+
+            # ensure initial state reflects "동절기 조건 동일"
+            on_same_toggle()
+            # pack the indoor frame before the main form frame
+            try:
+                indoor_frame.pack(fill=tk.X, padx=10, pady=(6,0), before=frm)
+            except Exception:
+                indoor_frame.pack(fill=tk.X, padx=10, pady=(6,0))
+
+            # Add a canvas on the right to show a psychrometric chart
+            chart_canvas = tk.Canvas(chart_frame, bg='#1a1a1a', bd=1, relief='sunken')
+            # fill the chart_frame
+            chart_canvas.pack(fill='both', expand=True)
+
+            ent_coil_rh = labeled_entry(frm, 6, '코일통과 후 RH (%RH):', coil_rh_var)
+            # LAT display (read-only)
+            tk.Label(frm, text='LAT (℃):').grid(row=7, column=0, sticky='w', padx=4, pady=4)
+            ent_lat_display = tk.Entry(frm, textvariable=lat_var, width=18, state='readonly')
+            ent_lat_display.grid(row=7, column=1, sticky='w', padx=4, pady=4)
+            # Coil-exit enthalpy at LAT (read-only)
+            coil_ent_var = tk.StringVar()
+            tk.Label(frm, text='코일 통과 후 엔탈피 (kcal/kg):').grid(row=8, column=0, sticky='w', padx=4, pady=4)
+            ent_coil_ent = tk.Entry(frm, textvariable=coil_ent_var, width=18, state='readonly')
+            ent_coil_ent.grid(row=8, column=1, sticky='w', padx=4, pady=4)
+            # Delta T display (read-only)
+            tk.Label(frm, text='ΔT (℃):').grid(row=9, column=0, sticky='w', padx=4, pady=4)
+            ent_delta_display = tk.Entry(frm, textvariable=delta_var, width=18, state='readonly')
+            ent_delta_display.grid(row=9, column=1, sticky='w', padx=4, pady=4)
+            # AHU-design delta (ΔT - 0.3) display - placed between ΔT and 온도차 풍량
+            calc_delta_var = tk.StringVar()
+            tk.Label(frm, text='공조기 산정용 온도차(℃, △T - 0.3 )').grid(row=10, column=0, sticky='w', padx=4, pady=4)
+            ent_calc_delta = tk.Entry(frm, textvariable=calc_delta_var, width=18, state='readonly')
+            ent_calc_delta.grid(row=10, column=1, sticky='w', padx=4, pady=4)
+            # AHU airflow display (read-only) computed from total sensible and delta T
+            flow_var = tk.StringVar()
+            tk.Label(frm, text='온도차(△T) 풍량 (m3/hr):').grid(row=11, column=0, sticky='w', padx=4, pady=4)
+            ent_flow_display = tk.Entry(frm, textvariable=flow_var, width=18, state='readonly')
+            ent_flow_display.grid(row=11, column=1, sticky='w', padx=4, pady=4)
+            # AHU-design delta margin flow (supply flow)
+            margin_flow_var = tk.StringVar()
+            # rename to 급기풍량 (supply flow)
+            tk.Label(frm, text='급기풍량 (m3/hr):').grid(row=13, column=0, sticky='w', padx=4, pady=4)
+            ent_margin_flow = tk.Entry(frm, textvariable=margin_flow_var, width=18, state='readonly')
+            ent_margin_flow.grid(row=13, column=1, sticky='w', padx=4, pady=4)
+            # Outdoor air input (accept number or percent)
+            outdoor_var = tk.StringVar(value='0')
+            tk.Label(frm, text='외기량 (m3/hr 또는 % 입력 가능):').grid(row=14, column=0, sticky='w', padx=4, pady=4)
+            ent_outdoor = tk.Entry(frm, textvariable=outdoor_var, width=18)
+            ent_outdoor.grid(row=14, column=1, sticky='w', padx=4, pady=4)
+            # inline note for outdoor conversion messages (non-modal)
+            outdoor_note_var = tk.StringVar()
+            outdoor_note_lbl = tk.Label(frm, textvariable=outdoor_note_var, fg='brown')
+            outdoor_note_lbl.grid(row=14, column=2, sticky='w', padx=4, pady=4)
+            # Return air (회수풍량) display (read-only)
+            return_flow_var = tk.StringVar()
+            tk.Label(frm, text='회수풍량 (m3/hr):').grid(row=15, column=0, sticky='w', padx=4, pady=4)
+            ent_return_flow = tk.Entry(frm, textvariable=return_flow_var, width=18, state='readonly')
+            ent_return_flow.grid(row=15, column=1, sticky='w', padx=4, pady=4)
+            # Mixed temperature and enthalpy display
+            mix_temp_var = tk.StringVar()
+            mix_ent_var = tk.StringVar()
+            tk.Label(frm, text='혼합온도 (℃):').grid(row=16, column=0, sticky='w', padx=4, pady=4)
+            ent_mix_temp = tk.Entry(frm, textvariable=mix_temp_var, width=18, state='readonly')
+            ent_mix_temp.grid(row=16, column=1, sticky='w', padx=4, pady=4)
+            tk.Label(frm, text='혼합엔탈피 (kcal/kg):').grid(row=17, column=0, sticky='w', padx=4, pady=4)
+            ent_mix_ent = tk.Entry(frm, textvariable=mix_ent_var, width=18, state='readonly')
+            ent_mix_ent.grid(row=17, column=1, sticky='w', padx=4, pady=4)
+            # Chilled coil capacity (kcal/hr) with 10% margin (label changed to 냉방코일용량)
+            coil_cap_var = tk.StringVar()
+            tk.Label(frm, text='냉방코일용량 (kcal/hr, 10%가산):').grid(row=18, column=0, sticky='w', padx=4, pady=4)
+            ent_coil_cap = tk.Entry(frm, textvariable=coil_cap_var, width=18, state='readonly')
+            ent_coil_cap.grid(row=18, column=1, sticky='w', padx=4, pady=4)
+            # Heating coil capacity (kcal/hr) with 10% margin (placed below chilled water capacity)
+            heat_cap_var = tk.StringVar()
+            tk.Label(frm, text='난방코일용량 (kcal/hr, 10%가산):').grid(row=19, column=0, sticky='w', padx=4, pady=4)
+            ent_heat_cap = tk.Entry(frm, textvariable=heat_cap_var, width=18, state='readonly')
+            ent_heat_cap.grid(row=19, column=1, sticky='w', padx=4, pady=4)
+            # Humidification capacity (kg/hr) - placed after heating coil capacity
+            humid_cap_var = tk.StringVar()
+            tk.Label(frm, text='가습용량 (kg/hr):').grid(row=20, column=0, sticky='w', padx=4, pady=4)
+            ent_humid_cap = tk.Entry(frm, textvariable=humid_cap_var, width=18, state='readonly')
+            ent_humid_cap.grid(row=20, column=1, sticky='w', padx=4, pady=4)
+            
+            # generic commit handler: when an entry is committed (Enter or focus lost)
+            # IMPORTANT: Define this FIRST so other handlers can call it
+            def process_entry_commit(event=None):
+                # run the common recompute chain; swallowing exceptions to keep UI robust
+                try:
+                    recompute_outdoor_props()
+                except Exception:
+                    pass
+                try:
+                    recompute_frac()
+                except Exception:
+                    pass
+                try:
+                    update_return_air()
+                except Exception:
+                    pass
+                try:
+                    update_mixed_props()
+                except Exception:
+                    pass
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+                try:
+                    compute_humid_capacity()
+                except Exception:
+                    pass
+                try:
+                    draw_psychrometric()
+                except Exception:
+                    pass
+
+            # when focus leaves, if value contains % convert using margin_flow_var
+            def process_outdoor_focusout(event=None):
+                try:
+                    raw = (outdoor_var.get() or '').strip()
+                    if raw == '':
+                        return
+                    # percent input
+                    if '%' in raw:
+                        try:
+                            p = raw.replace('%', '').strip()
+                            p_num = to_float(p)
+                            if p_num is None:
+                                outdoor_var.set('')
+                                return
+                            p_frac = float(p_num) / 100.0
+                            base = to_float(margin_flow_var.get())
+                            if base is None:
+                                # can't compute without margin flow
+                                outdoor_var.set('')
+                                return
+                            val = float(base) * p_frac
+                            # ceil to nearest 100
+                            val_ceil = int(math.ceil(val / 100.0) * 100)
+                            outdoor_var.set(f"{val_ceil:,}")
+                            # update return air display
+                            try:
+                                update_return_air()
+                            except Exception:
+                                pass
+                        except Exception:
+                            outdoor_var.set('')
+                    else:
+                        # numeric input: format with commas, keep value as-is (no ceil)
+                        try:
+                            v = to_float(raw)
+                            if v is None:
+                                outdoor_var.set('')
+                                return
+                            vi = int(round(v))
+                            outdoor_var.set(f"{vi:,}")
+                            try:
+                                update_return_air()
+                            except Exception:
+                                pass
+                        except Exception:
+                            outdoor_var.set('')
+                except Exception:
+                    try:
+                        outdoor_var.set('')
+                    except Exception:
+                        pass
+
+            try:
+                ent_outdoor.bind('<FocusOut>', process_outdoor_focusout)
+                # when Enter pressed in outdoor entry, first convert %->m3/hr then run full recompute
+                def handle_outdoor_return(event=None):
+                    # Run a full recompute first so margin_flow_var / flow_var may be available
+                    try:
+                        process_entry_commit()
+                    except Exception:
+                        pass
+
+                    raw = (outdoor_var.get() or '').strip()
+                    if not raw:
+                        # nothing to do
+                        return
+
+                    # If the user entered a percent, try to convert to m3/hr
+                    if '%' in raw:
+                        try:
+                            p = raw.replace('%', '').strip()
+                            p_num = to_float(p)
+                        except Exception:
+                            p_num = None
+
+                        if p_num is None:
+                            # invalid percent, leave as-is but run recompute
+                            process_entry_commit()
+                            return
+
+                        # Prefer margin_flow_var (design), fall back to AHU flow
+                        base = to_float(margin_flow_var.get())
+                        if base is None or float(base) <= 0:
+                            base = to_float(flow_var.get())
+
+                        if base is None or float(base) <= 0:
+                            # Can't compute conversion: set inline note so user knows why
+                            try:
+                                outdoor_note_var.set('급기풍량이 계산되지 않아 % 변환 불가')
+                            except Exception:
+                                pass
+                            # run recompute to ensure UI updated
+                            try:
+                                process_entry_commit()
+                            except Exception:
+                                pass
+                            return
+
+                        # perform conversion and update entry
+                        try:
+                            val = float(base) * (float(p_num) / 100.0)
+                            val_ceil = int(math.ceil(val / 100.0) * 100)
+                            outdoor_var.set(f"{val_ceil:,}")
+                        except Exception:
+                            # if conversion failed, leave value and let follow-up handlers run
+                            try:
+                                outdoor_note_var.set('외기 변환 중 오류')
+                            except Exception:
+                                pass
+                            pass
+
+                    # ensure follow-up recompute to refresh dependent fields
+                    try:
+                        process_entry_commit()
+                    except Exception:
+                        pass
+                    # clear inline note if conversion succeeded or recompute ran
+                    try:
+                        # if the current outdoor_var value no longer contains '%', clear note
+                        if '%' not in (outdoor_var.get() or ''):
+                            outdoor_note_var.set('')
+                    except Exception:
+                        pass
+
+                ent_outdoor.bind('<Return>', handle_outdoor_return)
+            except Exception:
+                pass
+
+            # bind Enter and FocusOut on commonly edited entries so committing updates everything
+            try:
+                for ent in (win_db_entry, win_rh_entry, sum_db_entry, sum_rh_entry,
+                            ent_sens, ent_lat, ent_indoor_heat,
+                            ent_indoor_t_entry, ent_indoor_rh_entry,
+                            ent_indoor_w_t_entry, ent_indoor_w_rh_entry,
+                            ent_coil_rh):  # ent_outdoor removed - has custom handler
+                    try:
+                        ent.bind('<Return>', lambda e, fn=process_entry_commit: fn())
+                    except Exception:
+                        pass
+                    try:
+                        ent.bind('<FocusOut>', lambda e, fn=process_entry_commit: fn())
+                    except Exception:
+                        pass
+                    try:
+                        # realtime on any key change
+                        ent.bind('<KeyRelease>', lambda e, fn=process_entry_commit: fn())
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            def update_return_air():
+                try:
+                    # parse supply (급기풍량) from margin_flow_var
+                    supply = to_float(margin_flow_var.get())
+                    if supply is None:
+                        return_flow_var.set('')
+                        return
+                    raw = (outdoor_var.get() or '').strip()
+                    if raw == '':
+                        return_flow_var.set('')
+                        return
+                    # if percent, compute outdoor from supply
+                    if '%' in raw:
+                        p = raw.replace('%', '').strip()
+                        pnum = to_float(p)
+                        if pnum is None:
+                            return_flow_var.set('')
+                            return
+                        outdoor_m3 = float(supply) * (float(pnum) / 100.0)
+                        outdoor_m3_ceil = int(math.ceil(outdoor_m3 / 100.0) * 100)
+                    else:
+                        v = to_float(raw.replace(',', ''))
+                        if v is None:
+                            return_flow_var.set('')
+                            return
+                        outdoor_m3_ceil = int(round(v))
+                    # compute return = supply - outdoor
+                    ret = float(supply) - float(outdoor_m3_ceil)
+                    if ret <= 0:
+                        # if non-positive, show 0
+                        return_flow_var.set('0')
+                    else:
+                        ret_ceil = int(math.ceil(ret / 100.0) * 100)
+                        return_flow_var.set(f"{ret_ceil:,}")
+                    # update mixed properties after return updated
+                    try:
+                        update_mixed_props()
+                    except Exception:
+                        pass
+                except Exception:
+                    try:
+                        return_flow_var.set('')
+                    except Exception:
+                        pass
+
+            # bind key events to ensure recompute on typing (robust across platforms)
+            try:
+                # live-format 전체현열량 (total sensible) with thousand separators on key release
+                def live_format_total(event=None):
+                    try:
+                        s = total_sens_var.get()
+                        if not s:
+                            return
+                        st = str(s).replace(',', '').replace('\u00A0', '').strip()
+                        if st == '':
+                            return
+                        v = float(st)
+                        # set as integer with thousand separators
+                        total_sens_var.set(f"{int(round(v)):,.0f}")
+                        # update dependent values
+                        try:
+                            recompute_frac()
+                        except Exception:
+                            pass
+                    except Exception:
+                        return
+
+                ent_sens.bind('<KeyRelease>', live_format_total)
+                ent_lat.bind('<KeyRelease>', lambda e: recompute_frac())
+                # live-format 전체잠열량 as well
+                def live_format_lat(event=None):
+                    try:
+                        s = total_lat_var.get()
+                        if not s:
+                            return
+                        st = str(s).replace(',', '').replace('\u00A0', '').strip()
+                        if st == '':
+                            return
+                        v = float(st)
+                        total_lat_var.set(f"{int(round(v)):,.0f}")
+                        try:
+                            recompute_frac()
+                        except Exception:
+                            pass
+                    except Exception:
+                        return
+
+                ent_lat.bind('<KeyRelease>', live_format_lat)
+                ent_sens.bind('<FocusOut>', lambda e: format_total_with_commas(total_sens_var))
+                ent_lat.bind('<FocusOut>', lambda e: format_total_with_commas(total_lat_var))
+            except Exception:
+                pass
+            try:
+                ent_frac.bind('<KeyRelease>', lambda e: recompute_lat())
+            except Exception:
+                pass
+            try:
+                ent_indoor_t.bind('<KeyRelease>', lambda e: recompute_lat())
+                ent_indoor_rh.bind('<KeyRelease>', lambda e: recompute_lat())
+                ent_coil_rh.bind('<KeyRelease>', lambda e: recompute_lat())
+                # also bind 동절기 inputs to recompute heating/cooling in real time
+                try:
+                    indoor_w_t_var.trace('w', lambda *a: (recompute_lat(), update_mixed_props()))
+                    indoor_w_rh_var.trace('w', lambda *a: (recompute_lat(), update_mixed_props()))
+                except Exception:
+                    try:
+                        indoor_w_t_var.trace_add('write', lambda *a: (recompute_lat(), update_mixed_props()))
+                        indoor_w_rh_var.trace_add('write', lambda *a: (recompute_lat(), update_mixed_props()))
+                    except Exception:
+                        pass
+                try:
+                    ent_indoor_w_t_entry.bind('<KeyRelease>', lambda e: (recompute_lat(), update_mixed_props()))
+                    ent_indoor_w_rh_entry.bind('<KeyRelease>', lambda e: (recompute_lat(), update_mixed_props()))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # helper parse (accept commas and NBSP)
+            def to_float(s):
+                try:
+                    if s is None:
+                        return None
+                    st = str(s).strip()
+                    st = st.replace(',', '').replace('\u00A0', '')
+                    if st == '':
+                        return None
+                    return float(st)
+                except Exception:
+                    return None
+
+            def format_total_with_commas(var):
+                try:
+                    v = to_float(var.get())
+                    if v is None:
+                        return
+                    vi = int(round(v))
+                    var.set(f"{vi:,}")
+                except Exception:
+                    pass
+
+            def recompute_frac(*a):
+                # if manual override is off, compute from totals
+                if manual_frac_var.get():
+                    return
+                s = to_float(total_sens_var.get())
+                l = to_float(total_lat_var.get())
+                if s is None or l is None:
+                    sens_frac_var.set('')
+                    return
+                denom = (s + l)
+                if denom == 0:
+                    sens_frac_var.set('')
+                    return
+                frac = s / denom
+                try:
+                    sens_frac_var.set(f"{frac:.3f}")
+                except Exception:
+                    sens_frac_var.set(str(frac))
+                # update LAT when fraction updated from totals
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            # helpers to compute enthalpy (kcal/kg) and absolute humidity (g/kg)
+            def enthalpy_kcal_per_kg(T_C, w):
+                # enthalpy_kJ_per_kg_dry returns kJ/kg; convert to kcal/kg (1 kJ = 0.239005736 kcal)
+                try:
+                    h_kj = enthalpy_kJ_per_kg_dry(T_C, w)
+                    return h_kj * 0.239005736
+                except Exception:
+                    return None
+
+            def abs_humidity_g_per_kg(T_C, RH_pct):
+                try:
+                    w = humidity_ratio(T_C, RH_pct / 100.0)
+                    if w is None:
+                        return None
+                    # w is kg water vapor per kg dry air -> multiply by 1000 g/kg
+                    return w * 1000.0
+                except Exception:
+                    return None
+
+            def recompute_outdoor_props(*a):
+                try:
+                    # winter: compute/display if numeric inputs are present
+                    try:
+                        t_w = to_float(win_db_var.get())
+                        rh_w = to_float(win_rh_var.get())
+                        if t_w is None or rh_w is None:
+                            win_h_var.set('')
+                            win_abs_var.set('')
+                        else:
+                            w_w = humidity_ratio(t_w, float(rh_w) / 100.0)
+                            h_w = enthalpy_kcal_per_kg(t_w, w_w) if w_w is not None else None
+                            if h_w is None:
+                                win_h_var.set('')
+                            else:
+                                win_h_var.set(f"{h_w:.2f}")
+                            if w_w is None:
+                                win_abs_var.set('')
+                            else:
+                                win_abs_var.set(f"{w_w*1000.0:.2f}")
+                    except Exception:
+                        win_h_var.set('')
+                        win_abs_var.set('')
+                    # summer: compute/display if numeric inputs are present
+                    try:
+                        t_s = to_float(sum_db_var.get())
+                        rh_s = to_float(sum_rh_var.get())
+                        if t_s is None or rh_s is None:
+                            sum_h_var.set('')
+                            sum_abs_var.set('')
+                        else:
+                            w_s = humidity_ratio(t_s, float(rh_s) / 100.0)
+                            h_s = enthalpy_kcal_per_kg(t_s, w_s) if w_s is not None else None
+                            if h_s is None:
+                                sum_h_var.set('')
+                            else:
+                                sum_h_var.set(f"{h_s:.2f}")
+                            if w_s is None:
+                                sum_abs_var.set('')
+                            else:
+                                sum_abs_var.set(f"{w_s*1000.0:.2f}")
+                    except Exception:
+                        sum_h_var.set('')
+                        sum_abs_var.set('')
+                    # redraw psychrometric chart
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            def compute_humid_capacity():
+                try:
+                    # parse outdoor (외기량) in m3/hr — accept numeric or percent (use margin_flow if percent)
+                    raw = (outdoor_var.get() or '').strip()
+                    outdoor_m3 = None
+                    if raw == '':
+                        outdoor_m3 = 0.0
+                    elif '%' in raw:
+                        # prefer margin_flow then flow
+                        base = to_float(margin_flow_var.get())
+                        if base is None or float(base) <= 0:
+                            base = to_float(flow_var.get())
+                        p = raw.replace('%', '').strip()
+                        pnum = to_float(p)
+                        if base is None or pnum is None:
+                            outdoor_m3 = None
+                        else:
+                            outdoor_m3 = float(base) * (float(pnum) / 100.0)
+                    else:
+                        v = to_float(raw.replace(',', ''))
+                        outdoor_m3 = float(v) if v is not None else None
+
+                    # get abs humidity values in g/kg
+                    indoor_w_abs_g = to_float(indoor_w_abs_var.get())
+                    win_abs_g = to_float(win_abs_var.get())
+                    if outdoor_m3 is None or indoor_w_abs_g is None or win_abs_g is None:
+                        humid_cap_var.set('')
+                        return
+
+                    # convert g/kg diff to kg/kg
+                    diff_kg_per_kg = (float(indoor_w_abs_g) - float(win_abs_g)) / 1000.0
+                    # formula: 1.2 * outdoor_m3 * diff (kg/hr)
+                    humid_kghr = 1.2 * float(outdoor_m3) * diff_kg_per_kg
+                    humid_cap_var.set(f"{humid_kghr:.2f}")
+                except Exception:
+                    try:
+                        humid_cap_var.set('')
+                    except Exception:
+                        pass
+
+            # wire traces for outdoor condition inputs
+            # wire traces for outdoor condition inputs
+            try:
+                # mark touched flags on key activity and recompute only when touched
+                def _mark_win_touched(evt=None):
+                    nonlocal win_touched
+                    win_touched = True
+                    recompute_outdoor_props()
+
+                def _mark_sum_touched(evt=None):
+                    nonlocal sum_touched
+                    sum_touched = True
+                    recompute_outdoor_props()
+
+                win_db_entry.bind('<KeyRelease>', _mark_win_touched)
+                win_rh_entry.bind('<KeyRelease>', _mark_win_touched)
+                sum_db_entry.bind('<KeyRelease>', _mark_sum_touched)
+                sum_rh_entry.bind('<KeyRelease>', _mark_sum_touched)
+                # also support trace for programmatic changes
+                win_db_var.trace('w', lambda *a: recompute_outdoor_props())
+                win_rh_var.trace('w', lambda *a: recompute_outdoor_props())
+                sum_db_var.trace('w', lambda *a: recompute_outdoor_props())
+                sum_rh_var.trace('w', lambda *a: recompute_outdoor_props())
+            except Exception:
+                try:
+                    win_db_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                    win_rh_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                    sum_db_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                    sum_rh_var.trace_add('write', lambda *a: recompute_outdoor_props())
+                except Exception:
+                    pass
+            # compute once on open if defaults present; schedule after dialog appears
+            try:
+                # initial recompute chain after dialog appears: outdoor props, return air, mixed props, LAT
+                def _initial_recompute():
+                    try:
+                        recompute_outdoor_props()
+                    except Exception:
+                        pass
+                    try:
+                        update_return_air()
+                    except Exception:
+                        pass
+                    try:
+                        update_mixed_props()
+                    except Exception:
+                        pass
+                    try:
+                        recompute_lat()
+                    except Exception:
+                        pass
+                    # compute initial absolute humidity values for indoor conditions
+                    try:
+                        update_indoor_abs()
+                    except Exception:
+                        pass
+                    try:
+                        update_indoor_w_abs()
+                    except Exception:
+                        pass
+                    try:
+                        compute_humid_capacity()
+                    except Exception:
+                        pass
+                    # draw psychrometric chart after all computations
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+
+                dlg.after(50, _initial_recompute)
+            except Exception:
+                try:
+                    recompute_outdoor_props()
+                except Exception:
+                    pass
+                try:
+                    update_return_air()
+                except Exception:
+                    pass
+                try:
+                    update_mixed_props()
+                except Exception:
+                    pass
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            # realtime bindings: when supply/outdoor change, update return/mixed/coils
+            try:
+                margin_flow_var.trace('w', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
+                outdoor_var.trace('w', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
+            except Exception:
+                try:
+                    margin_flow_var.trace_add('write', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
+                    outdoor_var.trace_add('write', lambda *a: (update_return_air(), update_mixed_props(), recompute_lat()))
+                except Exception:
+                    pass
+
+            def update_mixed_props():
+                try:
+                    # parse required values
+                    supply = to_float(margin_flow_var.get())
+                    # supply may be a formatted string like '1,200'
+                    if supply is None:
+                        supply = (stored_margin_flow if 'stored_margin_flow' in locals() else None)
+                    if supply is None or supply == 0:
+                        mix_temp_var.set('')
+                        mix_ent_var.set('')
+                        return
+                    # outdoor volume: if percent provided, compute from supply; else numeric
+                    outdoor_raw = (outdoor_var.get() or '').strip() if 'outdoor_var' in locals() else ''
+                    outdoor_m3 = None
+                    if outdoor_raw:
+                        if '%' in outdoor_raw:
+                            pnum = to_float(outdoor_raw.replace('%','').strip())
+                            if pnum is not None:
+                                outdoor_m3 = float(supply) * (float(pnum) / 100.0)
+                        else:
+                            outdoor_m3 = to_float(outdoor_raw.replace(',',''))
+                    # if outdoor_m3 not given, try stored outdoor
+                    if outdoor_m3 is None:
+                        outdoor_m3 = self.ahu_capacity.get('outdoor_m3_hr') if hasattr(self,'ahu_capacity') else None
+                    # return air numeric
+                    ret_raw = return_flow_var.get() if return_flow_var.get() else None
+                    return_m3 = None
+                    if ret_raw:
+                        return_m3 = to_float(str(ret_raw).replace(',',''))
+                    elif 'return_flow_var' in locals():
+                        return_m3 = None
+                    # if we still lack outdoor or return, attempt compute: return = supply - outdoor
+                    if outdoor_m3 is not None and (return_m3 is None):
+                        return_m3 = float(supply) - float(outdoor_m3)
+                    if outdoor_m3 is None or return_m3 is None:
+                        mix_temp_var.set('')
+                        mix_ent_var.set('')
+                        return
+                    # parse temps
+                    summer_db = to_float(sum_db_var.get())
+                    indoor_t = to_float(indoor_t_var.get())
+                    if summer_db is None or indoor_t is None:
+                        mix_temp_var.set('')
+                        mix_ent_var.set('')
+                        return
+                    # mixed temperature formula: (outdoor*summer_db + return*indoor_t) / supply
+                    try:
+                        mixed_T = (float(outdoor_m3) * float(summer_db) + float(return_m3) * float(indoor_t)) / float(supply)
+                        mix_temp_var.set(f"{mixed_T:.2f}")
+                    except Exception:
+                        mix_temp_var.set('')
+                    # mixed enthalpy: mass-weighted enthalpy per kg dry air (assume same basis)
+                    try:
+                        # compute outdoor enthalpy (use summer_db and outdoor RH input)
+                        out_rh = None
+                        if '%' in (sum_rh_var.get() or ''):
+                            out_rh = to_float(sum_rh_var.get().replace('%',''))
+                        else:
+                            out_rh = to_float(sum_rh_var.get())
+                        if out_rh is None:
+                            mix_ent_var.set('')
+                            return
+                        # compute outdoor w and h (kcal/kg)
+                        w_out = humidity_ratio(float(summer_db), float(out_rh)/100.0)
+                        h_out_kj = enthalpy_kJ_per_kg_dry(float(summer_db), w_out)
+                        h_out_kcal = h_out_kj * 0.2388458966 if h_out_kj is not None else None
+                        # compute return air enthalpy using indoor conditions
+                        w_ret = humidity_ratio(float(indoor_t_var.get()), float(indoor_rh_var.get())/100.0)
+                        h_ret_kj = enthalpy_kJ_per_kg_dry(float(indoor_t_var.get()), w_ret)
+                        h_ret_kcal = h_ret_kj * 0.2388458966 if h_ret_kj is not None else None
+                        if h_out_kcal is None or h_ret_kcal is None:
+                            mix_ent_var.set('')
+                            return
+                        # mass-weighted average enthalpy (assuming volumetric flows proportional to mass flows)
+                        mixed_h = (float(outdoor_m3) * float(h_out_kcal) + float(return_m3) * float(h_ret_kcal)) / float(supply)
+                        mix_ent_var.set(f"{mixed_h:.3f}")
+                        # compute chilled water coil capacity = 1.2 * supply * (mixed_ent - coil_ent)
+                        try:
+                            # supply (m3/hr)
+                            supply_num = float(supply)
+                            # mixed enthalpy (kcal/kg)
+                            mixed_ent_val = float(mixed_h)
+                            # coil exit enthalpy (kcal/kg) from coil_ent_var
+                            coil_ent_val = None
+                            try:
+                                coil_ent_val = float(coil_ent_var.get()) if coil_ent_var.get() else None
+                            except Exception:
+                                coil_ent_val = None
+                            if coil_ent_val is None:
+                                coil_cap_var.set('')
+                            else:
+                                cap = 1.2 * supply_num * (mixed_ent_val - float(coil_ent_val))
+                                # ensure non-negative
+                                cap = max(0.0, cap)
+                                # apply 10% margin (1.1x)
+                                cap = cap * 1.1
+                                # floor to nearest 1000 (내림천단위)
+                                cap = math.floor(cap / 1000.0) * 1000.0
+                                if cap <= 0:
+                                    coil_cap_var.set('0')
+                                else:
+                                    coil_cap_var.set(f"{int(cap):,}")
+                                # compute coil-through temperature from indoor heat load:
+                                # coil_T = indoor_temp + (indoor_heat_load / 1.2 / 0.24 / supply)
+                                try:
+                                    # use 동절기 건구온도 for coil-through calculation
+                                    indoor_temp = to_float(indoor_w_t_var.get())
+                                    indoor_heat_load = to_float(indoor_heat_load_var.get())
+                                    supply_val = float(supply)
+                                    coil_T = None
+                                    if indoor_temp is None or indoor_heat_load is None or supply_val == 0:
+                                        coil_T = None
+                                    else:
+                                        coil_T = float(indoor_temp) + (float(indoor_heat_load) / 1.2 / 0.24 / float(supply_val))
+                                except Exception:
+                                    coil_T = None
+
+                                # compute mixed winter temp (weighted) and heating coil capacity
+                                try:
+                                    winter_db = to_float(win_db_var.get())
+                                    if winter_db is None or coil_T is None:
+                                        heat_cap_var.set('')
+                                    else:
+                                        try:
+                                            # mixed winter temp uses 동절기 indoor temp (indoor_w_t_var)
+                                            mixed_winter_T = (float(outdoor_m3) * float(winter_db) + float(return_m3) * float(to_float(indoor_w_t_var.get()) if to_float(indoor_w_t_var.get()) is not None else 0.0)) / float(supply)
+                                        except Exception:
+                                            mixed_winter_T = None
+                                        if mixed_winter_T is None:
+                                            heat_cap_var.set('')
+                                        else:
+                                            heat_cap = 1.2 * 0.24 * float(supply) * (float(coil_T) - float(mixed_winter_T)) * 1.1
+                                            heat_cap = max(0.0, heat_cap)
+                                            heat_cap = math.floor(heat_cap / 1000.0) * 1000.0
+                                            if heat_cap <= 0:
+                                                heat_cap_var.set('0')
+                                            else:
+                                                heat_cap_var.set(f"{int(heat_cap):,}")
+                                except Exception:
+                                    heat_cap_var.set('')
+                        except Exception:
+                            coil_cap_var.set('')
+                    except Exception:
+                        mix_ent_var.set('')
+                except Exception:
+                    mix_temp_var.set('')
+                    mix_ent_var.set('')
+
+            def on_manual_toggle(*a):
+                manual = bool(manual_frac_var.get())
+                # enable or disable fraction entry
+                try:
+                    if manual:
+                        ent_frac.configure(state='normal')
+                    else:
+                        ent_frac.configure(state='disabled')
+                except Exception:
+                    try:
+                        if manual:
+                            ent_frac.configure(state='normal')
+                        else:
+                            ent_frac.configure(state='readonly')
+                    except Exception:
+                        pass
+                # When manual mode, sensible input stays enabled, latent is calculated
+                # When auto mode, both sensible and latent inputs are enabled
+                if manual:
+                    # In manual SHR mode: enable sensible, disable latent (will be calculated)
+                    try:
+                        ent_sens.configure(state='normal')
+                        ent_lat.configure(state='disabled')
+                    except Exception:
+                        pass
+                    # Trigger calculation if SHR already has a value
+                    try:
+                        on_frac_change()
+                    except Exception:
+                        pass
+                else:
+                    # In auto mode: enable both sensible and latent
+                    try:
+                        ent_sens.configure(state='normal')
+                        ent_lat.configure(state='normal')
+                    except Exception:
+                        pass
+                # Update LAT calculation
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            def on_frac_change(*a):
+                if not manual_frac_var.get():
+                    return
+                f = to_float(sens_frac_var.get())
+                if f is not None:
+                    # When SHR is manually entered, calculate latent load from sensible and SHR
+                    # Formula: SHR = Sensible / (Sensible + Latent)
+                    # Therefore: Latent = Sensible * (1 - SHR) / SHR (when SHR != 0)
+                    # If SHR = 1, then Latent = 0
+                    try:
+                        sens_val = to_float(total_sens_var.get())
+                        if sens_val is not None:
+                            if abs(f - 1.0) < 1e-9:  # SHR = 1
+                                total_lat_var.set('0')
+                            elif f > 1e-9:  # SHR > 0 and != 1
+                                lat_calc = sens_val * (1.0 - f) / f
+                                # Format with comma separator
+                                total_lat_var.set(f"{int(round(lat_calc)):,}")
+                            else:  # SHR = 0 or negative
+                                total_lat_var.set('')
+                    except Exception:
+                        pass
+                    
+                    # Disable latent input when manual SHR is active
+                    try:
+                        ent_lat.configure(state='disabled')
+                    except Exception:
+                        pass
+                else:
+                    # No valid SHR: enable latent input
+                    try:
+                        ent_lat.configure(state='normal')
+                    except Exception:
+                        pass
+                # ensure LAT updates when fraction changes
+                try:
+                    recompute_lat()
+                except Exception:
+                    pass
+
+            # traces
+            try:
+                total_sens_var.trace('w', lambda *a: recompute_frac())
+                total_lat_var.trace('w', lambda *a: recompute_frac())
+                manual_frac_var.trace('w', lambda *a: on_manual_toggle())
+                sens_frac_var.trace('w', lambda *a: on_frac_change())
+                # When sensible load changes in manual SHR mode, recalculate latent
+                total_sens_var.trace('w', lambda *a: on_frac_change() if manual_frac_var.get() else None)
+                # also update LAT when temperature/RH fields change
+                try:
+                    indoor_t_var.trace('w', lambda *a: recompute_lat())
+                    indoor_rh_var.trace('w', lambda *a: recompute_lat())
+                    coil_rh_var.trace('w', lambda *a: recompute_lat())
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    total_sens_var.trace_add('write', lambda *a: recompute_frac())
+                    total_lat_var.trace_add('write', lambda *a: recompute_frac())
+                    manual_frac_var.trace_add('write', lambda *a: on_manual_toggle())
+                    sens_frac_var.trace_add('write', lambda *a: on_frac_change())
+                    # When sensible load changes in manual SHR mode, recalculate latent
+                    total_sens_var.trace_add('write', lambda *a: on_frac_change() if manual_frac_var.get() else None)
+                    # update LAT when temperature/RH/fraction change
+                    try:
+                        indoor_t_var.trace_add('write', lambda *a: recompute_lat())
+                        indoor_rh_var.trace_add('write', lambda *a: recompute_lat())
+                        coil_rh_var.trace_add('write', lambda *a: recompute_lat())
+                    except Exception:
+                        try:
+                            indoor_t_var.trace('w', lambda *a: recompute_lat())
+                            indoor_rh_var.trace('w', lambda *a: recompute_lat())
+                            coil_rh_var.trace('w', lambda *a: recompute_lat())
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # local psychrometric helpers and LAT solver
+            def p_ws_pa(T_C):
+                # Buck (1981) equation for saturation vapor pressure over water (hPa), then to Pa
+                # T_C expected in deg C
+                try:
+                    es_hpa = 6.1121 * math.exp((18.678 - T_C / 234.5) * (T_C / (257.14 + T_C)))
+                    return es_hpa * 100.0
+                except Exception:
+                    return 0.0
+
+            def humidity_ratio(T_C, RH_frac, p_pa=101325.0):
+                # epsilon: ratio of molecular weights (water/vapor)
+                eps = 0.621945
+                try:
+                    pv = RH_frac * p_ws_pa(T_C)
+                    if pv >= p_pa:
+                        return None
+                    return eps * pv / (p_pa - pv)
+                except Exception:
+                    return None
+
+            def enthalpy_kJ_per_kg_dry(T_C, w):
+                # Enthalpy using constant latent heat (A안): L = 2501.0 kJ/kg
+                cp_air = 1.005  # kJ/kg.K
+                cp_v = 1.86     # kJ/kg.K
+                L = 2501.0
+                return cp_air * T_C + w * (L + cp_v * T_C)
+
+            def compute_LAT_local(T1_C, RH1_pct, SHR, RH_target_pct, p_pa=101325.0, tol=1e-7):
+                # Use bisection on T2 with improved thermodynamics
+                try:
+                    T1 = float(T1_C)
+                    RHt = float(RH_target_pct) / 100.0
+                except Exception:
+                    return None
+                w1 = humidity_ratio(T1, float(RH1_pct) / 100.0, p_pa)
+                if w1 is None:
+                    return None
+                h1 = enthalpy_kJ_per_kg_dry(T1, w1)
+
+                cp_air = 1.005
+
+                def f(T2):
+                    pv2 = RHt * p_ws_pa(T2)
+                    if pv2 >= p_pa:
+                        return 1.0
+                    w2 = humidity_ratio(T2, RHt, p_pa)
+                    if w2 is None:
+                        return 1.0
+                    h2 = enthalpy_kJ_per_kg_dry(T2, w2)
+                    denom = (h1 - h2)
+                    if denom <= 1e-12:
+                        return 1.0
+                    SHR_calc = cp_air * (T1 - T2) / denom
+                    return SHR_calc - SHR
+
+                lo = -40.0
+                hi = T1 - 1e-9
+                try:
+                    f_lo = f(lo)
+                    f_hi = f(hi)
+                except Exception:
+                    return None
+                if f_lo * f_hi > 0:
+                    return None
+                for _ in range(300):
+                    mid = 0.5 * (lo + hi)
+                    f_mid = f(mid)
+                    if abs(f_mid) < tol:
+                        return mid
+                    if f_lo * f_mid <= 0:
+                        hi = mid
+                        f_hi = f_mid
+                    else:
+                        lo = mid
+                        f_lo = f_mid
+                return 0.5 * (lo + hi)
+
+            # draw comprehensive psychrometric chart on the canvas (Tkinter-only implementation)
+            def draw_psychrometric():
+                try:
+                    cvs = chart_canvas
+                    cvs.delete('all')
+                    cvs.update_idletasks()
+                    w = cvs.winfo_width()
+                    h = cvs.winfo_height()
+                    if w <= 1 or h <= 1:
+                        w, h = 700, 650
+                    
+                    # dark background similar to professional chart
+                    cvs.create_rectangle(0, 0, w, h, fill='#1a1a1a', outline='')
+                    
+                    margin_l, margin_r, margin_t, margin_b = 50, 30, 30, 40
+                    plot_w = w - margin_l - margin_r
+                    plot_h = h - margin_t - margin_b
+                    
+                    # chart range: temp -15~40°C, abs humidity 0~50 g/kg
+                    xmin, xmax = -15.0, 40.0
+                    ymin, ymax = 0.0, 40.0
+                    
+                    def xpix(T):
+                        return margin_l + (T - xmin) / (xmax - xmin) * plot_w
+                    def ypix(gpk):
+                        return margin_t + (ymax - gpk) / (ymax - ymin) * plot_h
+                    
+                    # title
+                    cvs.create_text(w/2, 15, text='습공기 선도', font=('Arial', 11, 'bold'), fill='white')
+                    
+                    # grid: vertical temperature lines (every 5°C)
+                    for T in range(-15, 41, 5):
+                        x = xpix(T)
+                        cvs.create_line(x, margin_t, x, margin_t + plot_h, fill='#444444', width=1)
+                        cvs.create_text(x, margin_t + plot_h + 10, text=str(T), fill='white', font=('Arial', 8))
+                    cvs.create_text(margin_l + plot_w/2, h - 10, text='건구온도 (℃)', fill='white', font=('Arial', 9))
+                    
+                    # horizontal abs humidity lines (every 5 g/kg)
+                    for gpk in range(0, 41, 5):
+                        y = ypix(gpk)
+                        cvs.create_line(margin_l, y, margin_l + plot_w, y, fill='#444444', width=1)
+                        cvs.create_text(margin_l - 10, y, text=str(gpk), fill='white', font=('Arial', 8), anchor='e')
+                    cvs.create_text(20, margin_t + plot_h/2, text='절대습도 (g/kg)', fill='white', font=('Arial', 9), angle=90)
+                    
+                    # saturation curve (100% RH) - bold
+                    pts = []
+                    T = xmin
+                    while T <= xmax:
+                        try:
+                            w_sat = humidity_ratio(T, 1.0)
+                            if w_sat is not None and w_sat * 1000.0 <= ymax:
+                                pts.append((xpix(T), ypix(w_sat * 1000.0)))
+                        except:
+                            pass
+                        T += 0.5
+                    for i in range(len(pts) - 1):
+                        cvs.create_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], fill='#00aaff', width=2)
+                    
+                    # RH curves (10%, 20%, ..., 90%)
+                    for RH in [10, 20, 30, 40, 50, 60, 70, 80, 90]:
+                        pts = []
+                        T = xmin
+                        while T <= xmax:
+                            try:
+                                w_rh = humidity_ratio(T, RH / 100.0)
+                                if w_rh is not None and w_rh * 1000.0 <= ymax:
+                                    pts.append((xpix(T), ypix(w_rh * 1000.0)))
+                            except:
+                                pass
+                            T += 1.0
+                        for i in range(len(pts) - 1):
+                            cvs.create_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], fill='#666666', width=1)
+                        # label RH curve
+                        if len(pts) > len(pts)//2:
+                            try:
+                                mid = pts[len(pts)//2]
+                                cvs.create_text(mid[0], mid[1]-8, text=f'{RH}%', fill='#aaaaaa', font=('Arial', 7))
+                            except:
+                                pass
+                    
+                    # enthalpy lines (diagonal lines) - approximate constant enthalpy as diagonal from top-left to bottom-right
+                    # enthalpy h = cp*T + w*(L + cpv*T); for simplicity draw lines of constant h in kJ/kg
+                    for h_kj in range(10, 100, 10):
+                        pts = []
+                        # solve for points: given h_kj, find (T, w) pairs
+                        for T in range(-15, 41, 2):
+                            try:
+                                # h_kj = 1.005*T + w*(2501 + 1.86*T)
+                                # solve for w: w = (h_kj - 1.005*T) / (2501 + 1.86*T)
+                                denom = 2501.0 + 1.86 * T
+                                if denom != 0:
+                                    w_kg = (h_kj - 1.005 * T) / denom
+                                    if w_kg >= 0 and w_kg * 1000.0 <= ymax:
+                                        pts.append((xpix(T), ypix(w_kg * 1000.0)))
+                            except:
+                                pass
+                        for i in range(len(pts) - 1):
+                            cvs.create_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], fill='#555555', width=1, dash=(2, 2))
+                    
+                    # plot calculated points
+                    def plot_point(T, gpk, label, color='red', size=5, rh=None):
+                        try:
+                            if T < xmin or T > xmax or gpk < ymin or gpk > ymax:
+                                return
+                            x, y = xpix(T), ypix(gpk)
+                            cvs.create_oval(x-size, y-size, x+size, y+size, fill=color, outline='white', width=1)
+                            cvs.create_text(x+15, y-10, text=label, fill=color, font=('Arial', 8, 'bold'), anchor='w')
+                            # add temperature, RH, and absolute humidity info below the label
+                            info_lines = []
+                            info_lines.append(f'DB: {T:.1f}℃')
+                            if rh is not None:
+                                info_lines.append(f'RH: {rh:.0f}%')
+                            info_lines.append(f'AH: {gpk:.1f}g/kg')
+                            for i, line in enumerate(info_lines):
+                                cvs.create_text(x+15, y+2+i*10, text=line, fill=color, font=('Arial', 7), anchor='w')
+                        except:
+                            pass
+                    
+                    # winter outdoor
+                    try:
+                        t_w = to_float(win_db_var.get())
+                        w_w_g = to_float(win_abs_var.get())
+                        rh_w = to_float(win_rh_var.get())
+                        if t_w is not None and w_w_g is not None:
+                            plot_point(float(t_w), float(w_w_g), '외기(동)', color='#00ccff', rh=rh_w)
+                    except:
+                        pass
+                    
+                    # summer outdoor
+                    try:
+                        t_s = to_float(sum_db_var.get())
+                        w_s_g = to_float(sum_abs_var.get())
+                        rh_s = to_float(sum_rh_var.get())
+                        if t_s is not None and w_s_g is not None:
+                            plot_point(float(t_s), float(w_s_g), '외기(하)', color='#ff6600', rh=rh_s)
+                    except:
+                        pass
+                    # draw line from summer outdoor to summer indoor and plot mixed point
+                    try:
+                        # retrieve summer indoor and outdoor values
+                        it = to_float(indoor_t_var.get())
+                        iw = to_float(indoor_abs_var.get())
+                        t_s = to_float(sum_db_var.get())
+                        w_s_g = to_float(sum_abs_var.get())
+                        if it is not None and iw is None:
+                            # compute iw from indoor RH if necessary
+                            irh = to_float(indoor_rh_var.get())
+                            if irh is not None:
+                                wtmp = humidity_ratio(float(it), float(irh) / 100.0)
+                                if wtmp is not None:
+                                    iw = wtmp * 1000.0
+                        if it is not None and iw is not None and t_s is not None and w_s_g is not None:
+                            # draw connecting line (summer outdoor -> summer indoor)
+                            try:
+                                x1, y1 = xpix(float(t_s)), ypix(float(w_s_g))
+                                x2, y2 = xpix(float(it)), ypix(float(iw))
+                                cvs.create_line(x1, y1, x2, y2, fill='#88ccff', width=2)
+                            except Exception:
+                                pass
+                            # compute and plot mixed point using same logic as update_mixed_props
+                            try:
+                                # parse supply/outdoor/return volumes
+                                supply = to_float(margin_flow_var.get())
+                                if supply is None:
+                                    supply = (stored_margin_flow if 'stored_margin_flow' in locals() else None)
+                                outdoor_raw = (outdoor_var.get() or '').strip()
+                                outdoor_m3 = None
+                                if outdoor_raw:
+                                    if '%' in outdoor_raw:
+                                        pnum = to_float(outdoor_raw.replace('%','').strip())
+                                        if pnum is not None and supply is not None:
+                                            outdoor_m3 = float(supply) * (float(pnum) / 100.0)
+                                    else:
+                                        outdoor_m3 = to_float(outdoor_raw.replace(',',''))
+                                if outdoor_m3 is None:
+                                    outdoor_m3 = self.ahu_capacity.get('outdoor_m3_hr') if hasattr(self,'ahu_capacity') else None
+                                return_m3 = None
+                                try:
+                                    ret_raw = return_flow_var.get() if return_flow_var.get() else None
+                                    if ret_raw:
+                                        return_m3 = to_float(str(ret_raw).replace(',',''))
+                                except Exception:
+                                    return_m3 = None
+                                if outdoor_m3 is not None and return_m3 is None and supply is not None:
+                                    return_m3 = float(supply) - float(outdoor_m3)
+                                if outdoor_m3 is not None and return_m3 is not None and supply is not None and supply != 0:
+                                    # compute outdoor and return absolute humidity in g/kg
+                                    try:
+                                        out_rh = to_float(sum_rh_var.get())
+                                        if out_rh is None:
+                                            out_rh = to_float(sum_rh_var.get().replace('%',''))
+                                    except Exception:
+                                        out_rh = None
+                                    w_out = humidity_ratio(float(t_s), float(out_rh)/100.0) if out_rh is not None else None
+                                    w_ret = humidity_ratio(float(indoor_t_var.get()), float(indoor_rh_var.get())/100.0) if (indoor_t_var.get() and indoor_rh_var.get()) else None
+                                    if w_out is not None and w_ret is not None:
+                                        # convert to g/kg
+                                        w_out_g = w_out * 1000.0
+                                        w_ret_g = w_ret * 1000.0
+                                        mixed_w_g = (float(outdoor_m3) * float(w_out_g) + float(return_m3) * float(w_ret_g)) / float(supply)
+                                        mixed_T = (float(outdoor_m3) * float(t_s) + float(return_m3) * float(it)) / float(supply)
+                                        # compute RH at mixed point
+                                        mixed_rh = None
+                                        try:
+                                            w_kg = mixed_w_g / 1000.0
+                                            w_sat = humidity_ratio(mixed_T, 1.0)
+                                            if w_sat is not None and w_sat > 0:
+                                                mixed_rh = (w_kg / w_sat) * 100.0
+                                        except Exception:
+                                            pass
+                                        # plot mixed point
+                                        try:
+                                            plot_point(float(mixed_T), float(mixed_w_g), '혼합', color='#ffff88', size=4, rh=mixed_rh)
+                                            x_m = xpix(float(mixed_T))
+                                            y_m = ypix(float(mixed_w_g))
+                                        except Exception:
+                                            pass
+                                        # Draw horizontal line from mixed point to coil-exit RH curve (coil_rh_var),
+                                        # then follow that RH curve to the LAT temperature point. Use sky-blue color.
+                                        try:
+                                            crh_val = to_float(coil_rh_var.get())
+                                            lat_t = to_float(lat_var.get())
+                                            if crh_val is not None and x_m is not None and y_m is not None:
+                                                # find T on the coil-RH curve where absolute humidity ~= mixed_w_g
+                                                best_T = None
+                                                best_diff = None
+                                                step_search = 0.2
+                                                T = xmin
+                                                while T <= xmax:
+                                                    try:
+                                                        w_rh = humidity_ratio(T, float(crh_val) / 100.0)
+                                                        if w_rh is not None:
+                                                            w_rh_g = w_rh * 1000.0
+                                                            diff = abs(w_rh_g - float(mixed_w_g))
+                                                            if best_diff is None or diff < best_diff:
+                                                                best_diff = diff
+                                                                best_T = T
+                                                    except Exception:
+                                                        pass
+                                                    T += step_search
+                                                if best_T is not None:
+                                                    x_int = xpix(best_T)
+                                                    # horizontal line to RH curve intersection
+                                                    try:
+                                                        cvs.create_line(x_m, y_m, x_int, y_m, fill='#87CEEB', width=2)
+                                                    except Exception:
+                                                        pass
+                                                    # follow RH curve from intersection to LAT temperature (if LAT available)
+                                                    try:
+                                                        # build RH points for coil_rh from best_T towards lat_t
+                                                        pts_rh = []
+                                                        if lat_t is None:
+                                                            # if LAT unknown, just draw a short segment along RH curve (to the right)
+                                                            Tstart = best_T
+                                                            Tend = min(xmax, best_T + 5.0)
+                                                        else:
+                                                            Tstart = best_T
+                                                            Tend = float(lat_t)
+                                                        # choose direction and step
+                                                        if Tend >= Tstart:
+                                                            T = Tstart
+                                                            step_dir = abs(step_search)
+                                                            cond = lambda a, b: a <= b + 1e-9
+                                                        else:
+                                                            T = Tstart
+                                                            step_dir = -abs(step_search)
+                                                            cond = lambda a, b: a >= b - 1e-9
+                                                        # sample points along RH curve
+                                                        while cond(T, Tend):
+                                                            try:
+                                                                w_rh = humidity_ratio(T, float(crh_val) / 100.0)
+                                                                if w_rh is not None:
+                                                                    w_rh_g = w_rh * 1000.0
+                                                                    if w_rh_g >= ymin and w_rh_g <= ymax:
+                                                                        pts_rh.append((xpix(T), ypix(w_rh_g)))
+                                                            except Exception:
+                                                                pass
+                                                            T += step_dir
+                                                        # if LAT provided, ensure the LAT point on RH curve included (compute exact w at LAT)
+                                                        if lat_t is not None:
+                                                            try:
+                                                                w_at_lat = humidity_ratio(float(lat_t), float(crh_val) / 100.0)
+                                                                if w_at_lat is not None:
+                                                                    w_at_lat_g = w_at_lat * 1000.0
+                                                                    pts_rh.append((xpix(float(lat_t)), ypix(w_at_lat_g)))
+                                                            except Exception:
+                                                                pass
+                                                        # draw the RH-curve-following line
+                                                        if len(pts_rh) >= 2:
+                                                            for ii in range(len(pts_rh)-1):
+                                                                try:
+                                                                    cvs.create_line(pts_rh[ii][0], pts_rh[ii][1], pts_rh[ii+1][0], pts_rh[ii+1][1], fill='#87CEEB', width=2)
+                                                                except Exception:
+                                                                    pass
+                                                    except Exception:
+                                                        pass
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    
+                    # indoor (summer)
+                    try:
+                        it = to_float(indoor_t_var.get())
+                        irh = to_float(indoor_rh_var.get())
+                        iw = to_float(indoor_abs_var.get())
+                        # compute iw from RH if missing
+                        try:
+                            if (iw is None) and (it is not None) and (irh is not None):
+                                w = humidity_ratio(float(it), float(irh) / 100.0)
+                                if w is not None:
+                                    iw = w * 1000.0
+                        except Exception:
+                            pass
+
+                        if it is not None and iw is not None:
+                            plot_point(float(it), float(iw), '실내(하)', color='#00ff00', rh=irh)
+                            # Draw SHF (현열비) line at the summer indoor point if sens_frac available
+                            try:
+                                f = to_float(sens_frac_var.get())
+                                if f is None:
+                                    # try to compute from totals if available
+                                    try:
+                                        s_num = to_float(total_sens_var.get())
+                                        l_num = to_float(total_lat_var.get())
+                                        if s_num is not None and l_num is not None and (s_num + l_num) != 0:
+                                            f = float(s_num) / float(s_num + l_num)
+                                    except Exception:
+                                        f = None
+                                if f is not None:
+                                    try:
+                                        ff = float(f)
+                                    except Exception:
+                                        ff = None
+                                    # Build SHF line starting at summer indoor point (it, iw)
+                                    step = 0.5
+                                    pts_left = []
+                                    try:
+                                        # extend to the left (decreasing temperature) from indoor temperature until saturation reached
+                                        Tcur = float(it) - step
+                                        Tmin = float(xmin)
+                                        while Tcur >= Tmin:
+                                            w_line = float(iw)
+                                            if ff is not None and ff > 0 and ff < 1:
+                                                cp = 1.005
+                                                L = 2501.0
+                                                slope = 1000.0 * cp * (1.0 - ff) / (ff * L)
+                                                w_line = float(iw) + slope * (Tcur - float(it))
+                                            try:
+                                                w_sat = humidity_ratio(Tcur, 1.0)
+                                                w_sat_g = None if w_sat is None else (w_sat * 1000.0)
+                                            except Exception:
+                                                w_sat_g = None
+                                            # include point only if below or equal to saturation and within y range
+                                            if w_sat_g is not None and w_line <= w_sat_g and w_line >= ymin and w_line <= ymax:
+                                                pts_left.append((xpix(Tcur), ypix(w_line)))
+                                                Tcur -= step
+                                            else:
+                                                break
+                                    except Exception:
+                                        pts_left = []
+                                    # build sequence from indoor point to leftmost point
+                                    pts_combined = [(xpix(float(it)), ypix(float(iw)))] + pts_left
+                                    # draw if at least two distinct points exist
+                                    if len(pts_combined) >= 2:
+                                        for ii in range(len(pts_combined) - 1):
+                                            try:
+                                                cvs.create_line(pts_combined[ii][0], pts_combined[ii][1], pts_combined[ii+1][0], pts_combined[ii+1][1], fill='#88ff88', width=2, dash=(4,2))
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
+                    except:
+                        pass
+                    
+                    # indoor (winter)
+                    try:
+                        iwt = to_float(indoor_w_t_var.get())
+                        iww = to_float(indoor_w_abs_var.get())
+                        iwrh = to_float(indoor_w_rh_var.get())
+                        if iwt is not None and iww is not None:
+                            plot_point(float(iwt), float(iww), '실내(동)', color='#ffff00', rh=iwrh)
+                    except:
+                        pass
+                    
+                    # LAT point
+                    try:
+                        lat = to_float(lat_var.get())
+                        crh = to_float(coil_rh_var.get())
+                        if lat is not None and crh is not None:
+                            w_coil = humidity_ratio(lat, float(crh) / 100.0)
+                            if w_coil is not None:
+                                plot_point(float(lat), w_coil * 1000.0, 'LAT', color='#ff00ff', rh=crh)
+                    except:
+                        pass
+                    
+                    # LAT(동) point and lines
+                    try:
+                        # compute LAT(동) temperature: indoor_winter_temp + (indoor_heat_load / 1.2 / 0.24 / supply_flow)
+                        iwt = to_float(indoor_w_t_var.get())
+                        heat_load = to_float(indoor_heat_load_var.get())
+                        supply = to_float(margin_flow_var.get())
+                        if supply is None:
+                            supply = to_float(flow_var.get())
+                        winter_out_abs = to_float(win_abs_var.get())
+                        winter_out_temp = to_float(win_db_var.get())
+                        
+                        if iwt is not None and heat_load is not None and supply is not None and supply != 0 and winter_out_abs is not None and winter_out_temp is not None:
+                            # LAT(동) temperature
+                            lat_winter_temp = float(iwt) + (float(heat_load) / 1.2 / 0.24 / float(supply))
+                            # LAT(동) absolute humidity = winter outdoor absolute humidity
+                            lat_winter_abs = float(winter_out_abs)
+                            # compute RH at LAT(동) point
+                            lat_winter_rh = None
+                            try:
+                                w_kg = lat_winter_abs / 1000.0
+                                w_sat = humidity_ratio(lat_winter_temp, 1.0)
+                                if w_sat is not None and w_sat > 0:
+                                    lat_winter_rh = (w_kg / w_sat) * 100.0
+                            except Exception:
+                                pass
+                            
+                            # plot LAT(동) point
+                            plot_point(lat_winter_temp, lat_winter_abs, 'LAT(동)', color='#ff0000', rh=lat_winter_rh)
+                            
+                            # draw red line from winter outdoor to LAT(동) (horizontal line)
+                            try:
+                                x1 = xpix(float(winter_out_temp))
+                                y1 = ypix(float(winter_out_abs))
+                                x2 = xpix(lat_winter_temp)
+                                y2 = ypix(lat_winter_abs)
+                                cvs.create_line(x1, y1, x2, y2, fill='#ff0000', width=2)
+                            except Exception:
+                                pass
+                            
+                            # draw red line from LAT(동) to indoor(winter)
+                            try:
+                                iww = to_float(indoor_w_abs_var.get())
+                                if iww is not None:
+                                    x3 = xpix(lat_winter_temp)
+                                    y3 = ypix(lat_winter_abs)
+                                    x4 = xpix(float(iwt))
+                                    y4 = ypix(float(iww))
+                                    cvs.create_line(x3, y3, x4, y4, fill='#ff0000', width=2)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            def recompute_lat(*a):
+                try:
+                    it = to_float(indoor_t_var.get())
+                    irh = to_float(indoor_rh_var.get())
+                    crh = to_float(coil_rh_var.get())
+                    f = to_float(sens_frac_var.get())
+                    if it is None or irh is None or crh is None or f is None:
+                        lat_var.set('')
+                        delta_var.set('')
+                        return
+                    lat = compute_LAT_local(it, irh, float(f), crh)
+                    if lat is None:
+                        lat_var.set('')
+                        delta_var.set('')
+                        return
+                    lat_var.set(f"{lat:.3f}")
+                    # compute coil-exit enthalpy at LAT using coil_rh_var
+                    try:
+                        crh_val = to_float(coil_rh_var.get())
+                        if crh_val is None:
+                            coil_ent_var.set('')
+                        else:
+                            w_coil = humidity_ratio(lat, float(crh_val) / 100.0)
+                            if w_coil is None:
+                                coil_ent_var.set('')
+                            else:
+                                h_coil_kcal = enthalpy_kcal_per_kg(lat, w_coil)
+                                if h_coil_kcal is None:
+                                    coil_ent_var.set('')
+                                else:
+                                    coil_ent_var.set(f"{h_coil_kcal:.3f}")
+                    except Exception:
+                        coil_ent_var.set('')
+                    # compute delta = indoor_temp - LAT
+                    try:
+                        if it is not None:
+                            delta = it - float(lat)
+                            # truncate from second decimal place (keep 1 decimal, no rounding)
+                            trunc = int(delta * 10) / 10.0
+                            delta_var.set(f"{trunc:.1f}")
+                        else:
+                            delta_var.set('')
+                    except Exception:
+                        delta_var.set('')
+                    # compute AHU-design delta = trunc - 0.3, show truncated to 1 decimal
+                    try:
+                        if delta_var.get() and delta_var.get() != '':
+                            try:
+                                dnum = float(delta_var.get())
+                                calc = dnum - 0.3
+                                calc_trunc = int(calc * 10) / 10.0
+                                calc_delta_var.set(f"{calc_trunc:.1f}")
+                            except Exception:
+                                calc_delta_var.set('')
+                        else:
+                            calc_delta_var.set('')
+                    except Exception:
+                        calc_delta_var.set('')
+                    # compute AHU airflow if possible: total_sensible / 1.2 / 0.24 / delta
+                    try:
+                        s_val = to_float(total_sens_var.get())
+                        if s_val is None or it is None or lat is None:
+                            flow_var.set('')
+                        else:
+                            # use the truncated delta (in deg C)
+                            if trunc == 0:
+                                flow_var.set('')
+                            else:
+                                q = float(s_val) / 1.2 / 0.24 / trunc
+                                # ceiling to nearest 100 (백의자리에서 올림)
+                                q_ceil100 = int(math.ceil(q / 100.0) * 100)
+                                flow_var.set(f"{q_ceil100:,}")
+                    except Exception:
+                        flow_var.set('')
+
+                    # compute margin-adjusted airflow using AHU-design delta (calc_delta_var)
+                    try:
+                        s_val = to_float(total_sens_var.get())
+                        if s_val is None or it is None or lat is None:
+                            margin_flow_var.set('')
+                        else:
+                            # use calc_delta_var (design delta) if available
+                            cd = to_float(calc_delta_var.get())
+                            if cd is None or cd == 0:
+                                margin_flow_var.set('')
+                            else:
+                                q_m = float(s_val) / 1.2 / 0.24 / float(cd)
+                                q_m_ceil100 = int(math.ceil(q_m / 100.0) * 100)
+                                margin_flow_var.set(f"{q_m_ceil100:,}")
+                    except Exception:
+                        margin_flow_var.set('')
+                    try:
+                        update_mixed_props()
+                    except Exception:
+                        pass
+                    # redraw psychrometric chart after all updates
+                    try:
+                        draw_psychrometric()
+                    except Exception:
+                        pass
+                except Exception:
+                    lat_var.set('')
+                    delta_var.set('')
+
+            result = {'ok': False}
+
+            def on_ok():
+                # validate values
+                s = to_float(total_sens_var.get())
+                l = to_float(total_lat_var.get())
+                f = to_float(sens_frac_var.get())
+                it = to_float(indoor_t_var.get())
+                irh = to_float(indoor_rh_var.get())
+                crh = to_float(coil_rh_var.get())
+
+                # when manual fraction mode and fraction provided, totals may be disabled
+                if manual_frac_var.get():
+                    if f is None:
+                        messagebox.showerror('입력 오류', '현열비를 올바르게 입력하세요.')
+                        return
+                else:
+                    # require sensible and latent to be provided
+                    if s is None or l is None:
+                        messagebox.showerror('입력 오류', '전체현열량/전체잠열량을 올바르게 입력하세요.')
+                        return
+                    denom = s + l
+                    if denom == 0:
+                        messagebox.showerror('입력 오류', '전체현열량+전체잠열량의 합이 0입니다.')
+                        return
+                    # ensure fraction computed
+                    try:
+                        f = float(s) / float(denom)
+                    except Exception:
+                        f = None
+
+                # basic validation for temps/RH
+                if it is None or irh is None or crh is None:
+                    messagebox.showerror('입력 오류', '온도 및 상대습도 항목을 올바르게 입력하세요.')
+                    return
+
+                # store values
+                # compute LAT to store (if available)
+                try:
+                    lat_val = None
+                    fval = float(f) if f is not None else None
+                    if it is not None and irh is not None and crh is not None and fval is not None:
+                        lat_val = compute_LAT_local(it, irh, float(fval), crh)
+                except Exception:
+                    lat_val = None
+
+                # compute stored flow values using numeric parsed values
+                stored_flow = None
+                stored_margin_flow = None
+                try:
+                    s_num = to_float(total_sens_var.get())
+                    # prefer calc_delta_var for stored ahu_flow
+                    cd_num = to_float(calc_delta_var.get())
+                    dnum = to_float(delta_var.get())
+                    if s_num is not None and cd_num is not None and cd_num != 0:
+                        q_m = float(s_num) / 1.2 / 0.24 / float(cd_num)
+                        stored_margin_flow = int(math.ceil(q_m / 100.0) * 100)
+                    # legacy stored_flow based on truncated delta
+                    if s_num is not None and dnum is not None and dnum != 0:
+                        q = float(s_num) / 1.2 / 0.24 / float(dnum)
+                        stored_flow = int(math.ceil(q / 100.0) * 100)
+                except Exception:
+                    stored_flow = None
+                    stored_margin_flow = None
+
+                self.ahu_capacity = {
+                    'total_sensible_kcal_hr': s,
+                    'total_latent_kcal_hr': l,
+                    'sensible_fraction': f,
+                    'indoor_temp_c': it,
+                    'indoor_rh_pct': irh,
+                    'coil_exit_rh_pct': crh,
+                    'lat_c': lat_val,
+                    'delta_t_c': (dnum if 'dnum' in locals() else None),
+                    'design_delta_t_c': (cd_num if 'cd_num' in locals() else None),
+                    'ahu_flow_m3_hr': stored_margin_flow if stored_margin_flow is not None else stored_flow,
+                    'legacy_ahu_flow_m3_hr': stored_flow,
+                    'manual_frac': bool(manual_frac_var.get()),
+                    'outdoor_input_raw': (outdoor_var.get() if 'outdoor_var' in locals() else None),
+                    'outdoor_m3_hr': None
+                }
+                # store outdoor condition inputs (winter/summer)
+                try:
+                    self.ahu_capacity['outdoor_winter_db_c'] = to_float(win_db_var.get()) if 'win_db_var' in locals() else None
+                    self.ahu_capacity['outdoor_winter_rh_pct'] = to_float(win_rh_var.get()) if 'win_rh_var' in locals() else None
+                    self.ahu_capacity['outdoor_summer_db_c'] = to_float(sum_db_var.get()) if 'sum_db_var' in locals() else None
+                    self.ahu_capacity['outdoor_summer_rh_pct'] = to_float(sum_rh_var.get()) if 'sum_rh_var' in locals() else None
+                except Exception:
+                    # ignore storing outdoor conditions if any error
+                    pass
+                # compute stored outdoor value (numeric) if input present
+                try:
+                    if 'outdoor_var' in locals() and (outdoor_var.get() or '').strip() != '':
+                        raw = outdoor_var.get().strip()
+                        if '%' in raw:
+                            pnum = to_float(raw.replace('%', '').strip())
+                            base = (stored_margin_flow if stored_margin_flow is not None else stored_flow)
+                            if pnum is not None and base is not None:
+                                val = float(base) * (float(pnum) / 100.0)
+                                val_ceil = int(math.ceil(val / 100.0) * 100)
+                                self.ahu_capacity['outdoor_m3_hr'] = val_ceil
+                        else:
+                            vnum = to_float(raw)
+                            if vnum is not None:
+                                self.ahu_capacity['outdoor_m3_hr'] = int(round(vnum))
+                except Exception:
+                    self.ahu_capacity['outdoor_m3_hr'] = None
+                # compute stored return air = supply - outdoor
+                try:
+                    supply_num = None
+                    if 'margin_flow_var' in locals():
+                        supply_num = to_float(margin_flow_var.get())
+                    if supply_num is None:
+                        supply_num = (stored_margin_flow if stored_margin_flow is not None else stored_flow)
+                    out_num = self.ahu_capacity.get('outdoor_m3_hr')
+                    if supply_num is not None and out_num is not None:
+                        ret = float(supply_num) - float(out_num)
+                        if ret <= 0:
+                            self.ahu_capacity['return_air_m3_hr'] = 0
+                        else:
+                            self.ahu_capacity['return_air_m3_hr'] = int(math.ceil(ret / 100.0) * 100)
+                    else:
+                        self.ahu_capacity['return_air_m3_hr'] = None
+                except Exception:
+                    self.ahu_capacity['return_air_m3_hr'] = None
+                result['ok'] = True
+                try:
+                    dlg.grab_release()
+                except Exception:
+                    pass
+                dlg.destroy()
+
+            def on_cancel():
+                try:
+                    dlg.grab_release()
+                except Exception:
+                    pass
+                dlg.destroy()
+
+            # 버튼은 이미 위에서 btnf 프레임으로 생성되어 pack됨
+            try:
+                dlg.lift()
+            except Exception:
+                pass
+            okb = tk.Button(btnf, text='확인', command=on_ok, width=10)
+            okb.pack(side=tk.LEFT, padx=6)
+            cb = tk.Button(btnf, text='취소', command=on_cancel, width=10)
+            cb.pack(side=tk.LEFT, padx=6)
+
+            # center dialog and wait
+            try:
+                dlg.update_idletasks()
+                w = dlg.winfo_width()
+                h = dlg.winfo_height()
+                x = (dlg.winfo_toplevel().winfo_screenwidth() - w) // 2
+                y = (dlg.winfo_toplevel().winfo_screenheight() - h) // 2
+                dlg.geometry(f'+{x}+{y}')
+            except Exception:
+                pass
+
+            # ensure LAT initialized before showing dialog
+            try:
+                recompute_frac()
+                recompute_lat()
+            except Exception:
+                pass
+            self.root.wait_window(dlg)
+            return bool(result.get('ok'))
+        except Exception as e:
+            try:
+                messagebox.showerror('오류', f'공조기 용량 입력창 생성 중 오류: {e}')
+            except Exception:
+                pass
+            return False
 
     def _refresh_diffuser_outlines(self, palette: 'Palette'):
         """Update outlines on the given palette: assigned -> red, otherwise clear unless selected (blue).
@@ -6262,25 +8660,73 @@ class ResizableRectApp:
             except Exception:
                 assigned_all = set()
 
-            # iterate diffuser items tracked on palette (use tag 'diffuser' where possible)
+            # iterate diffuser and main_point items tracked on palette
             try:
                 candidates = list(palette.canvas.find_withtag('diffuser'))
+                # Also include main_points in the candidate list
+                try:
+                    for mp in palette.canvas.find_withtag('main_point'):
+                        if mp not in candidates:
+                            candidates.append(mp)
+                except Exception:
+                    pass
             except Exception:
                 candidates = list(palette.canvas.find_all())
 
+            # persistent applied diffusers set
+            try:
+                applied_diffusers = set(getattr(self, '_supply_assigned', set()) or set())
+            except Exception:
+                applied_diffusers = set()
+
+            # get active HVAC name to check if applied diffuser belongs to it
+            try:
+                active_hvac = getattr(self, '_active_hvac_name', None)
+            except Exception:
+                active_hvac = None
+
+            # build map of which diffusers belong to which HVAC
+            diffuser_to_hvac = {}
+            try:
+                for hvac_name, mapping in getattr(self, 'hvac_map', {}).items():
+                    if not mapping or not isinstance(mapping, dict):
+                        continue
+                    try:
+                        for did in mapping.get('ids', set()) or set():
+                            try:
+                                diffuser_to_hvac[int(did)] = hvac_name
+                            except Exception:
+                                diffuser_to_hvac[did] = hvac_name
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
             for iid in candidates:
                 try:
-                    if iid in assigned_all:
-                        # assigned: red outline
+                    # If item is applied (finalized), show yellow if it belongs to active HVAC, otherwise blue
+                    if iid in applied_diffusers:
                         try:
-                            palette.canvas.itemconfigure(iid, outline='red', width=2)
+                            belongs_to_active = (diffuser_to_hvac.get(iid) == active_hvac)
+                            if belongs_to_active:
+                                palette.canvas.itemconfigure(iid, outline='yellow', width=2)
+                            else:
+                                palette.canvas.itemconfigure(iid, outline='blue', width=2)
+                        except Exception:
+                            palette.canvas.itemconfigure(iid, outline='blue', width=2)
+                        continue
+
+                    if iid in assigned_all:
+                        # assigned but not applied: yellow outline
+                        try:
+                            palette.canvas.itemconfigure(iid, outline='yellow', width=2)
                         except Exception:
                             pass
                     else:
-                        # unassigned: if selected, blue; else clear
+                        # unassigned: if selected (temporary), red; else clear
                         try:
                             if getattr(palette, 'selected_points', None) and iid in getattr(palette, 'selected_points', set()):
-                                palette.canvas.itemconfigure(iid, outline='blue')
+                                palette.canvas.itemconfigure(iid, outline='red', width=2)
                             else:
                                 palette.canvas.itemconfigure(iid, outline='')
                         except Exception:
@@ -6487,6 +8933,68 @@ class ResizableRectApp:
                                     pass
                             except Exception:
                                 pass
+                            # additionally, remove hvac tag and any nearby main_point_flow labels
+                            try:
+                                for rem in ids:
+                                    try:
+                                        # try int conversion
+                                        try:
+                                            rem_int = int(rem)
+                                        except Exception:
+                                            rem_int = rem
+                                        if other_palette is None:
+                                            continue
+                                        # remove hvac tag from the specific item if present
+                                        try:
+                                            other_palette.canvas.dtag(rem_int, f'hvac:{oname}')
+                                        except Exception:
+                                            pass
+                                        # if the removed item exists on the other palette, try to delete nearby main_point_flow labels
+                                        try:
+                                            if rem_int in other_palette.canvas.find_all():
+                                                coords = other_palette.canvas.coords(rem_int)
+                                                if coords and len(coords) >= 2:
+                                                    if len(coords) >= 4:
+                                                        cx = (coords[0] + coords[2]) / 2.0
+                                                        cy = (coords[1] + coords[3]) / 2.0
+                                                    else:
+                                                        cx = coords[0]
+                                                        cy = coords[1]
+                                                    # scan hvac-tagged items for main_point_flow near this point
+                                                    try:
+                                                        for it in list(other_palette.canvas.find_withtag(f'hvac:{oname}')):
+                                                            try:
+                                                                tgs = other_palette.canvas.gettags(it)
+                                                            except Exception:
+                                                                tgs = ()
+                                                            if 'main_point_flow' not in tgs:
+                                                                continue
+                                                            try:
+                                                                c2 = other_palette.canvas.coords(it)
+                                                                if not c2 or len(c2) < 2:
+                                                                    continue
+                                                                if len(c2) >= 4:
+                                                                    ix = (c2[0] + c2[2]) / 2.0
+                                                                    iy = (c2[1] + c2[3]) / 2.0
+                                                                else:
+                                                                    ix = c2[0]
+                                                                    iy = c2[1]
+                                                                # distance threshold in pixels (approx); remove only very close labels
+                                                                if abs(ix - cx) <= 24 and abs(iy - cy) <= 24:
+                                                                    try:
+                                                                        other_palette.canvas.delete(it)
+                                                                    except Exception:
+                                                                        pass
+                                                            except Exception:
+                                                                continue
+                                                    except Exception:
+                                                        pass
+                                        except Exception:
+                                            pass
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
                         except Exception:
                             continue
             except Exception:
@@ -6504,6 +9012,7 @@ class ResizableRectApp:
             except Exception:
                 # fallback: nothing to do
                 pass
+            # Note: Blue outline will be applied after main point assignment completes
             # If this HVAC already has stored mapping on this palette, remove
             # any previously-created main-point markers (and their text labels)
             # before starting a new assignment. Do NOT delete diffuser items.
@@ -6557,6 +9066,16 @@ class ResizableRectApp:
                                     remaining.add(iid_int)
                             except Exception:
                                 remaining.add(iid_int)
+                        # Remove only items tagged specifically for this HVAC (includes flow labels tagged with hvac:<name>)
+                        try:
+                            hv_tag = f'hvac:{name}'
+                            for tag_item in list(rc.canvas.find_withtag(hv_tag)):
+                                try:
+                                    rc.canvas.delete(tag_item)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         # update mapping ids to remaining ones
                         try:
                             existing_map['ids'] = remaining
@@ -6641,31 +9160,56 @@ class ResizableRectApp:
                 return
             # clear previous highlights for this palette
             try:
+                # persistent supply-assigned set should not be cleared here
+                try:
+                    supply_assigned = set(getattr(self, '_supply_assigned', set()) or set())
+                except Exception:
+                    supply_assigned = set()
+                
+                # Build map of all assigned items to their HVAC systems
+                all_assigned_map = {}
+                try:
+                    for hvac_name, hvac_mapping in self.hvac_map.items():
+                        if hvac_mapping and isinstance(hvac_mapping, dict):
+                            for iid in hvac_mapping.get('ids', set()) or set():
+                                all_assigned_map[iid] = hvac_name
+                except Exception:
+                    pass
+                
+                # Restore outlines for previously highlighted items (includes main_points)
                 for iid in list(getattr(self, '_hvac_highlighted', set())):
                     try:
-                        # only clear items that still exist on this canvas
+                        # only process items that still exist on this canvas
                         if iid in rc.canvas.find_all():
-                            rc.canvas.itemconfigure(iid, outline='')
+                            # If applied (in supply_assigned), restore to blue
+                            if iid in supply_assigned:
+                                rc.canvas.itemconfigure(iid, outline='blue', width=2)
+                            # If assigned to some HVAC but not applied
+                            elif iid in all_assigned_map:
+                                # Will be set to yellow later if it belongs to the new HVAC
+                                rc.canvas.itemconfigure(iid, outline='')
+                            else:
+                                # Unassigned: clear outline
+                                rc.canvas.itemconfigure(iid, outline='')
                     except Exception:
                         pass
-                self._hvac_highlighted.clear()
+                
+                # Clear _hvac_highlighted set
+                try:
+                    self._hvac_highlighted.clear()
+                except Exception:
+                    self._hvac_highlighted = set()
             except Exception:
                 pass
             # Clear any existing point selection in the palette
+            # (selected_points only contains diffusers, not main_points)
             try:
-                if hasattr(rc, '_clear_point_selection'):
-                    rc._clear_point_selection()
-                else:
-                    # attempt to clear outlines and selected_points
-                    try:
-                        for sid in list(getattr(rc, 'selected_points', set())):
-                            try:
-                                rc.canvas.itemconfigure(sid, outline='')
-                            except Exception:
-                                pass
-                        rc.selected_points = set()
-                    except Exception:
-                        pass
+                # Get all currently selected points (diffusers only)
+                prev_selected = set(getattr(rc, 'selected_points', set()) or set())
+                
+                # Restore outlines for previously selected diffusers were already handled above
+                # in _hvac_highlighted loop, so just clear the set
+                rc.selected_points = set()
             except Exception:
                 pass
 
@@ -6721,11 +9265,23 @@ class ResizableRectApp:
             for iid in mapped_for_palette:
                 try:
                     if iid in rc.canvas.find_all():
-                        rc.canvas.itemconfigure(iid, outline='red', width=2)
+                        # Check if this item is a main_point (should not be added to selected_points)
                         try:
-                            rc.selected_points.add(iid)
+                            tags = rc.canvas.gettags(iid)
+                            is_main_point = 'main_point' in tags
                         except Exception:
-                            rc.selected_points = set([iid])
+                            is_main_point = False
+                        
+                        # Show all assigned items (diffusers and main_points) in yellow when their HVAC is selected
+                        rc.canvas.itemconfigure(iid, outline='yellow', width=2)
+                        
+                        if not is_main_point:
+                            # Only add diffusers to selected_points (not main_points)
+                            try:
+                                rc.selected_points.add(iid)
+                            except Exception:
+                                rc.selected_points = set([iid])
+                        
                         self._hvac_highlighted.add(iid)
                 except Exception:
                     pass
@@ -6884,6 +9440,7 @@ class ResizableRectApp:
                     # store mapping associated with this exact Palette instance so
                     # re-selecting works even if palette ordering changed
                     ids = set()
+                    # Add main point markers (created during assignment)
                     for kind, info in state.get('assigned', {}).items():
                         iid = info.get('iid')
                         labid = info.get('label_id')
@@ -6897,16 +9454,7 @@ class ResizableRectApp:
                                 ids.add(int(labid))
                             except Exception:
                                 pass
-                        # include any other canvas items that have the same diffuser_type tag
-                        try:
-                            for extra in canvas.find_withtag(f'diffuser_type:{kind}'):
-                                try:
-                                    ids.add(int(extra))
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                    # also include any currently selected diffuser ids in the palette
+                    # Add ONLY the currently selected diffuser ids (not all same-type diffusers)
                     try:
                         sel_pts = getattr(rc, 'selected_points', set()) or set()
                         for sp in list(sel_pts):
@@ -6918,6 +9466,54 @@ class ResizableRectApp:
                         pass
                     # store mapping with palette reference
                     try:
+                        # Before updating, remove diffusers from _supply_assigned that were
+                        # previously assigned to this HVAC but are no longer selected
+                        try:
+                            old_mapping = self.hvac_map.get(hvac_name)
+                            if old_mapping and isinstance(old_mapping, dict):
+                                old_ids = set()
+                                for oid in old_mapping.get('ids', set()) or set():
+                                    try:
+                                        old_ids.add(int(oid))
+                                    except Exception:
+                                        old_ids.add(oid)
+                                # Get main point ids (should not be removed from _supply_assigned)
+                                main_point_ids = set()
+                                try:
+                                    for kind, info in state.get('assigned', {}).items():
+                                        mp_iid = info.get('iid')
+                                        if mp_iid:
+                                            try:
+                                                main_point_ids.add(int(mp_iid))
+                                            except Exception:
+                                                main_point_ids.add(mp_iid)
+                                except Exception:
+                                    pass
+                                # Find diffusers that were in old mapping but not in new ids
+                                removed_diffusers = old_ids - ids - main_point_ids
+                                # Remove these from _supply_assigned
+                                try:
+                                    if hasattr(self, '_supply_assigned') and self._supply_assigned:
+                                        for rid in removed_diffusers:
+                                            try:
+                                                self._supply_assigned.discard(rid)
+                                            except Exception:
+                                                pass
+                                        # Also clear their outline
+                                        try:
+                                            for rid in removed_diffusers:
+                                                if rid in rc.canvas.find_all():
+                                                    try:
+                                                        rc.canvas.itemconfigure(rid, outline='')
+                                                    except Exception:
+                                                        pass
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        
                         # store mapping with palette reference
                         mapping_entry = {'palette': rc, 'ids': ids}
                         # compute per-main-point aggregated flows across the whole HVAC mapping
@@ -7013,6 +9609,58 @@ class ResizableRectApp:
                             main_point_flows = {}
                         mapping_entry['main_point_flows'] = main_point_flows
                         self.hvac_map[hvac_name] = mapping_entry
+                        # After main point assignment completes, mark all selected diffusers and main_points
+                        # with blue outline (applied/persistent state)
+                        try:
+                            # initialize persistent set if not present
+                            try:
+                                if not hasattr(self, '_supply_assigned') or self._supply_assigned is None:
+                                    self._supply_assigned = set()
+                            except Exception:
+                                self._supply_assigned = set()
+                            # get currently selected points on this palette and mark them as applied
+                            try:
+                                sel_pts = getattr(rc, 'selected_points', set()) or set()
+                                for sp in list(sel_pts):
+                                    try:
+                                        sp_int = int(sp)
+                                    except Exception:
+                                        sp_int = sp
+                                    try:
+                                        rc.canvas.itemconfigure(sp_int, outline='blue', width=2)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        self._supply_assigned.add(sp_int)
+                                    except Exception:
+                                        try:
+                                            self._supply_assigned = set(getattr(self, '_supply_assigned', set()) or set())
+                                            self._supply_assigned.add(sp_int)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                            # Also mark main_points as applied (blue outline)
+                            try:
+                                for kind, info in state.get('assigned', {}).items():
+                                    mp_iid = info.get('iid')
+                                    if mp_iid:
+                                        try:
+                                            mp_int = int(mp_iid)
+                                        except Exception:
+                                            mp_int = mp_iid
+                                        try:
+                                            rc.canvas.itemconfigure(mp_int, outline='blue', width=2)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self._supply_assigned.add(mp_int)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
                         # create small on-canvas labels next to each main point showing aggregated flow
                         try:
                             for iid, qv in list(main_point_flows.items()):
@@ -7295,7 +9943,24 @@ class ResizableRectApp:
         except Exception:
             pass
         
+        try:
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
+        except Exception:
+            pass
         win = tk.Toplevel(self.root)
+        try:
+            win.lift()
+            try:
+                win.wm_attributes('-topmost', True)
+                win.after(60, lambda: win.wm_attributes('-topmost', False))
+            except Exception:
+                pass
+        except Exception:
+            pass
         win.title(f"CSV 미리보기 - {os.path.basename(file_path)} ({used_enc})")
         win.geometry("800x400")
 
@@ -7603,6 +10268,185 @@ class ResizableRectApp:
             final_header.append(f"Table_{i}_Title")
             final_header.append(f"Table_{i}_Value")
 
+        # --- Show preview window with multiple tabs (like Excel sheets): pivot + per-room tabs ---
+        try:
+            # ensure any transient overlay is removed so the dialog is visible
+            try:
+                self._destroy_total_overlay()
+            except Exception:
+                pass
+            pv = tk.Toplevel(self.root)
+            try:
+                pv.lift()
+                try:
+                    pv.wm_attributes('-topmost', True)
+                    pv.after(60, lambda: pv.wm_attributes('-topmost', False))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            pv.title("장비일람표 미리보기")
+            pv.geometry("1000x520")
+
+            from tkinter import ttk
+            nb = ttk.Notebook(pv)
+            nb.pack(fill=tk.BOTH, expand=True)
+
+            # Prepare room maps (title->value) and orders
+            rooms = []
+            room_maps = []
+            room_title_orders = []
+            for r in export_rows[1:]:
+                try:
+                    base = r[:8]
+                    room_name = str(base[0]) if base and base[0] is not None else ''
+                    rooms.append(room_name)
+                    tlist = r[8] if len(r) > 8 else []
+                    m = {}
+                    order = []
+                    for (t0, v0) in (tlist or []):
+                        key = str(t0)
+                        if key not in m:
+                            order.append(key)
+                        m[key] = str(v0)
+                    room_maps.append(m)
+                    room_title_orders.append(order)
+                except Exception:
+                    rooms.append('')
+                    room_maps.append({})
+                    room_title_orders.append([])
+
+            # global title ordering
+            global_titles = []
+            seen = set()
+            for order in room_title_orders:
+                for t in order:
+                    if t not in seen:
+                        seen.add(t)
+                        global_titles.append(t)
+
+            # Pivot tab
+            pivot_frame = tk.Frame(nb)
+            nb.add(pivot_frame, text='Pivot')
+
+            pivot_fr = tk.Frame(pivot_frame)
+            pivot_fr.pack(fill=tk.BOTH, expand=True)
+
+            # Treeview for pivot
+            pivot_cols = ['항목'] + rooms
+            tree = ttk.Treeview(pivot_fr, columns=[f"c{i}" for i in range(len(pivot_cols))], show='headings')
+            for i, h in enumerate(pivot_cols):
+                tree.heading(f"c{i}", text=h)
+                tree.column(f"c{i}", width=160 if i == 0 else 120, anchor='w')
+
+            vsb = ttk.Scrollbar(pivot_fr, orient=tk.VERTICAL, command=tree.yview)
+            hsb = ttk.Scrollbar(pivot_fr, orient=tk.HORIZONTAL, command=tree.xview)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            tree.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            pivot_fr.rowconfigure(0, weight=1)
+            pivot_fr.columnconfigure(0, weight=1)
+
+            # First row: 공간이름
+            try:
+                tree.insert('', tk.END, values=['공간이름'] + rooms)
+            except Exception:
+                pass
+
+            for title in global_titles:
+                rowvals = [title]
+                for rm in room_maps:
+                    rowvals.append(rm.get(title, ''))
+                try:
+                    tree.insert('', tk.END, values=rowvals)
+                except Exception:
+                    continue
+
+            # Group tabs by equipment type (hvac_detail_text if present else hvac_text/unknown)
+            equip_groups = {}
+            # determine equipment label per room from export_rows (parallel to rooms list)
+            for i, r in enumerate(export_rows[1:]):
+                try:
+                    equip_label = r[2] if len(r) > 2 and r[2] else ''
+                except Exception:
+                    equip_label = ''
+                if not equip_label:
+                    # fallback to hvac text or generic
+                    try:
+                        equip_label = r[5] if len(r) > 5 and r[5] else ''
+                    except Exception:
+                        equip_label = ''
+                if not equip_label:
+                    equip_label = 'Unknown'
+                equip_groups.setdefault(equip_label, []).append(i)
+
+            # create one tab per equipment type
+            for equip_label, idx_list in equip_groups.items():
+                try:
+                    gf = tk.Frame(nb)
+                    nb.add(gf, text=equip_label)
+                    gfr = tk.Frame(gf)
+                    gfr.pack(fill=tk.BOTH, expand=True)
+
+                    # collect group room names and maps
+                    g_rooms = [rooms[i] for i in idx_list]
+                    g_maps = [room_maps[i] for i in idx_list]
+                    g_orders = [room_title_orders[i] for i in idx_list]
+
+                    # determine group titles order
+                    g_titles = []
+                    seen_g = set()
+                    for ordl in g_orders:
+                        for t in ordl:
+                            if t not in seen_g:
+                                seen_g.add(t)
+                                g_titles.append(t)
+
+                    # Treeview for this equipment group: pivoted
+                    cols = ['항목'] + g_rooms
+                    tv = ttk.Treeview(gfr, columns=[f"c{i}" for i in range(len(cols))], show='headings')
+                    for i, h in enumerate(cols):
+                        tv.heading(f"c{i}", text=h)
+                        tv.column(f"c{i}", width=160 if i == 0 else 120, anchor='w')
+
+                    vs = ttk.Scrollbar(gfr, orient=tk.VERTICAL, command=tv.yview)
+                    hs = ttk.Scrollbar(gfr, orient=tk.HORIZONTAL, command=tv.xview)
+                    tv.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+                    tv.grid(row=0, column=0, sticky='nsew')
+                    vs.grid(row=0, column=1, sticky='ns')
+                    hs.grid(row=1, column=0, sticky='ew')
+                    gfr.rowconfigure(0, weight=1)
+                    gfr.columnconfigure(0, weight=1)
+
+                    # first row: 공간이름
+                    try:
+                        tv.insert('', tk.END, values=['공간이름'] + g_rooms)
+                    except Exception:
+                        pass
+
+                    # rows: group titles
+                    for t in g_titles:
+                        rowvals = [t]
+                        for gm in g_maps:
+                            rowvals.append(gm.get(t, ''))
+                        try:
+                            tv.insert('', tk.END, values=rowvals)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # buttons area
+            btnf = tk.Frame(pv)
+            btnf.pack(fill=tk.X, pady=6)
+            exp_btn = tk.Button(btnf, text="Export (저장)...", command=lambda: pv.destroy())
+            exp_btn.pack(side=tk.LEFT, padx=8)
+            close_btn = tk.Button(btnf, text="Close", command=pv.destroy)
+            close_btn.pack(side=tk.RIGHT, padx=8)
+        except Exception:
+            pass
+
         # Ask user where to save .xlsx
         from tkinter import filedialog
         fp = filedialog.asksaveasfilename(parent=self.root, defaultextension='.xlsx', filetypes=[('Excel files', '*.xlsx'), ('All files', '*.*')], title='장비일람표 저장 (.xlsx)')
@@ -7838,6 +10682,47 @@ class ResizableRectApp:
                 rc.canvas.itemconfig(did, fill="red")
             except Exception:
                 pass
+    
+    def cloud_upload_current(self):
+        """현재 팔레트를 클라우드에 업로드"""
+        rc = self.get_current_palette()
+        if not rc:
+            messagebox.showinfo("정보", "활성화된 팔레트가 없습니다.")
+            return
+        
+        # 임시 파일에 저장 (보안: 고유한 임시 파일 생성)
+        import tempfile
+        temp_fd, temp_file = tempfile.mkstemp(suffix=".json", prefix="palette_")
+        
+        try:
+            data = rc.to_dict()
+            # Close the file descriptor and write to the file
+            os.close(temp_fd)
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            # 클라우드 업로드 다이얼로그 열기
+            from cloud_ui import CloudUploadDialog
+            dialog = CloudUploadDialog(self.root, file_path=temp_file, data_type="drawing")
+            self.root.wait_window(dialog)
+            
+            # 임시 파일 삭제
+            try:
+                os.remove(temp_file)
+            except Exception:
+                pass
+                
+        except Exception as e:
+            messagebox.showerror("오류", f"클라우드 업로드 준비 중 오류가 발생했습니다:\n{e}")
+    
+    def cloud_browser(self):
+        """클라우드 브라우저 열기"""
+        try:
+            from cloud_ui import CloudBrowserDialog
+            dialog = CloudBrowserDialog(self.root)
+            self.root.wait_window(dialog)
+        except Exception as e:
+            messagebox.showerror("오류", f"클라우드 브라우저를 여는 중 오류가 발생했습니다:\n{e}")
 
 
 if __name__ == "__main__":
